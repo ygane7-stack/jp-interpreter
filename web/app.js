@@ -1,4 +1,4 @@
-// 건축 통역 v1.0 (2026-11-15) — 일본어 해설 → 한국어 자막·음성
+// 건축 통역 v1.1 (2026-11-15) — 일본어(·중국어) 해설 → 한국어 자막·음성
 // 엔진 1: OpenAI gpt-realtime-translate (WebRTC, 음성→음성)
 // 엔진 2: Soniox stt-rt-v6 받아쓰기+번역 (WebSocket) → 브라우저 읽어주기(speechSynthesis)
 // 진짜 API 키는 이 페이지에 없다. Supabase 함수(jp-interpreter-token)에서 몇 분짜리 임시 열쇠만 받는다.
@@ -17,6 +17,7 @@ const $ = (id) => document.getElementById(id);
 const S = {
   engine: localStorage.jpiEngine || "openai",
   bld: localStorage.jpiBld || "",
+  lang: localStorage.jpiLang || "ja", // ja=일본어 / zh=중국어만(통역사의 일본어는 건너뜀) / mix=일·중 모두
   want: false, // 사용자가 켜 둔 상태(끊기면 다시 연결)
   live: null, // 지금 돌아가는 엔진 객체
   t0: 0, log: [], blocks: [], cur: null,
@@ -32,16 +33,34 @@ function status(t, cls) { const s = $("st"); s.textContent = t; s.className = "p
 function now() { return (performance.now() - S.t0) / 1000; }
 function L(k, x) { S.log.push(x === undefined ? { t: +now().toFixed(3), k } : { t: +now().toFixed(3), k, x }); }
 
+function setPairs() { S.pairs = allPairs(S.bld, S.lang).sort((a, b) => b[0].length - a[0].length); } // 힌트는 긴 말 먼저
 function fillBuildings() {
   const sel = $("bld");
+  const trip = BUILDINGS.filter((b) => b.day).sort((a, b) => a.day.localeCompare(b.day, "en", { numeric: true }));
+  const opt = (b) => `<option value="${b.id}">${b.day ? b.day + " · " : ""}${b.ko}</option>`;
   sel.innerHTML = `<option value="">건물 선택 안 함 (전체 용어집)</option>` +
-    BUILDINGS.map((b) => `<option value="${b.id}">${b.ko} — ${b.ja}</option>`).join("");
+    `<optgroup label="도쿄 일정 12/1~12/7">${trip.map(opt).join("")}</optgroup>` +
+    `<optgroup label="그 밖의 명소">${BUILDINGS.filter((b) => !b.day).map(opt).join("")}</optgroup>`;
   sel.value = S.bld;
   sel.onchange = () => {
-    S.bld = sel.value; localStorage.jpiBld = S.bld; S.pairs = allPairs(S.bld);
+    S.bld = sel.value; localStorage.jpiBld = S.bld;
+    const b = BUILDINGS.find((x) => x.id === S.bld);
+    if (b && b.lang && b.lang !== S.lang) { setLang(b.lang); return; } // 포럼을 고르면 "중국어만"으로
+    setPairs();
     if (S.want && S.engine === "soniox") restart("건물이 바뀌어 용어를 새로 넣는 중"); // Soniox 는 문맥을 연결할 때만 받음
   };
-  S.pairs = allPairs(S.bld);
+  setPairs();
+}
+function setLang(v) {
+  S.lang = v; localStorage.jpiLang = v; setPairs(); fillLang();
+  if (S.want && S.engine === "soniox") restart("듣는 말을 바꾸는 중");
+}
+function fillLang() {
+  $("dir").textContent = { ja: "日→韓", zh: "中→韓", mix: "日中→韓" }[S.lang];
+  for (const b of $("langSeg").querySelectorAll("button")) {
+    b.classList.toggle("sel", b.dataset.v === S.lang);
+    b.onclick = () => { if (S.lang !== b.dataset.v) setLang(b.dataset.v); };
+  }
 }
 function fillEngine() {
   for (const b of $("engineSeg").querySelectorAll("button")) {
@@ -68,8 +87,10 @@ function esc(s) { return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;"
 function render(b) {
   const box = $("subs");
   const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
-  b.el.querySelector(".ko").innerHTML = esc(b.ko) + (b.koTmp ? `<span class="tmp">${esc(b.koTmp)}</span>` : "");
-  b.el.querySelector(".ja").innerHTML = esc(b.ja) + (b.jaTmp ? `<span class="tmp">${esc(b.jaTmp)}</span>` : "");
+  b.el.querySelector(".ko").innerHTML = esc(b.ko) + (b.koTmp ? `<span class="tmp">${esc(b.koTmp)}</span>` : "") +
+    (b.skipKo ? ` <span class="skip">(통역사 부분: ${esc(b.skipKo)})</span>` : "");
+  b.el.querySelector(".ja").innerHTML = esc(b.ja) + (b.jaTmp ? `<span class="tmp">${esc(b.jaTmp)}</span>` : "") +
+    (b.skipJa ? ` <span class="skip">${esc(b.skipJa)}</span>` : "");
   // 용어 힌트: 일본어 원문에 용어집 단어가 나오면 "일본어 = 한국어" 딱지
   for (const [ja, ko] of S.pairs || []) {
     if (ja.length < 2 || b.hints.has(ja) || !b.ja.includes(ja)) continue;
@@ -158,6 +179,12 @@ async function startOpenAI(stream) {
   const pc = new RTCPeerConnection();
   const eng = { name: "openai", pc, closed: false };
   let lastDelta = 0;
+  // 중국어만: 원문에 가나가 섞이면 일본어(통역사) 구간으로 보고, 몇 초 늦게 나오는 한국어를 흐리게·소리 끔 (추정)
+  const langMarks = []; // [시각, "ja"|"zh"]
+  const LAG = 2.0;
+  const langAt = (t) => { let v = null; for (const [tt, l] of langMarks) { if (tt <= t) v = l; else break; } return v; };
+  const skipNow = () => S.lang === "zh" && langAt(now() - LAG) === "ja";
+  eng.iv = setInterval(() => { const o = $("out"); if (o) o.muted = !$("ttsOn").checked || skipNow(); }, 200);
   const gapBlock = () => {
     const t = now();
     if (!S.cur || (t - lastDelta > 2.5 && (S.cur.ko || S.cur.ja))) newBlock();
@@ -174,8 +201,16 @@ async function startOpenAI(stream) {
   const ready = new Promise((res, rej) => { dc.onopen = res; setTimeout(() => rej(new Error("GPT 연결 시간 초과")), 15000); });
   dc.onmessage = (m) => {
     let ev; try { ev = JSON.parse(m.data); } catch (_) { return; }
-    if (ev.type === "session.input_transcript.delta") { gapBlock(); S.cur.ja += ev.delta; L("j", ev.delta); render(S.cur); }
-    else if (ev.type === "session.output_transcript.delta") { gapBlock(); S.cur.ko += ev.delta; L("k", ev.delta); render(S.cur); }
+    if (ev.type === "session.input_transcript.delta") {
+      const l = /[\u3040-\u30ff]/.test(ev.delta) ? "ja" : /[\u4e00-\u9fff]/.test(ev.delta) ? "zh" : null;
+      if (l && (!langMarks.length || langMarks.at(-1)[1] !== l)) langMarks.push([now(), l]);
+      gapBlock(); S.cur.ja += ev.delta; L("j", ev.delta); render(S.cur);
+    } else if (ev.type === "session.output_transcript.delta") {
+      gapBlock();
+      if (skipNow()) { S.cur.skipKo = (S.cur.skipKo || "") + ev.delta; L("kx", ev.delta); }
+      else { S.cur.ko += ev.delta; L("k", ev.delta); }
+      render(S.cur);
+    }
     else if (ev.type === "session.closed") { eng.closedRes && eng.closedRes(); }
     else if (ev.type === "error") { L("err", ev.error); msg("GPT 오류: " + (ev.error?.message || ev.error?.code || ""), true); }
   };
@@ -192,7 +227,7 @@ async function startOpenAI(stream) {
   await pc.setRemoteDescription({ type: "answer", sdp: await r.text() });
   await ready;
   eng.stop = async () => {
-    eng.closed = true;
+    eng.closed = true; clearInterval(eng.iv);
     try {
       const done = new Promise((res) => { eng.closedRes = res; setTimeout(res, 3000); });
       dc.send(JSON.stringify({ type: "session.close" })); await done;
@@ -236,9 +271,11 @@ async function startSoniox(stream) {
   const tok = await getToken({ engine: "soniox" });
   const config = {
     model: "stt-rt-v6", audio_format: "pcm_s16le", sample_rate: 16000, num_channels: 1,
-    language_hints: ["ja"], enable_endpoint_detection: true, max_endpoint_delay_ms: 1200,
+    language_hints: S.lang === "ja" ? ["ja"] : S.lang === "zh" ? ["zh", "ja"] : ["ja", "zh"],
+    enable_language_identification: S.lang !== "ja",
+    enable_endpoint_detection: true, max_endpoint_delay_ms: 1200,
     translation: { type: "one_way", target_language: "ko" },
-    context: sonioxContext(S.bld),
+    context: sonioxContext(S.bld, S.lang),
   };
   const open = (withProto) => new Promise((res, rej) => {
     const ws = withProto
@@ -261,7 +298,13 @@ async function startSoniox(stream) {
       if (t.text === "<end>") { if (S.cur) S.cur.closing = true; flush(); L("end"); continue; }
       if (t.text === "<fin>") continue;
       const tr = t.translation_status === "translation";
-      if (!t.is_final) { if (tr) nfKo += t.text; else nfJa += t.text; continue; }
+      // 중국어만: 일본어(통역사)로 말한 부분과 그 번역은 건너뛴다
+      const skip = S.lang === "zh" && (tr ? t.source_language === "ja" : t.language === "ja");
+      if (!t.is_final) { if (skip) continue; if (tr) nfKo += t.text; else nfJa += t.text; continue; }
+      if (skip) {
+        if (!tr) { if (!S.cur || S.cur.closing) newBlock(); S.cur.skipJa = (S.cur.skipJa || "") + t.text; }
+        L(tr ? "kx" : "jx", t.text); continue;
+      }
       if (tr) {
         if (!S.cur) newBlock();
         S.cur.ko += t.text; L("k", t.text);
@@ -420,16 +463,16 @@ async function saveRec() {
 async function saveTxt() {
   const lines = S.blocks.filter((b) => b.ja || b.ko).map((b) => `[${Math.floor(b.t / 60)}:${String(Math.floor(b.t % 60)).padStart(2, "0")}]\n${b.ja}\n→ ${b.ko}\n`);
   if (!lines.length) return msg("저장할 자막이 없습니다");
-  const head = `건축 통역 자막 ${new Date().toLocaleString("ko-KR")} · 엔진 ${S.engine} · 건물 ${S.bld || "-"}\n\n`;
+  const head = `건축 통역 자막 ${new Date().toLocaleString("ko-KR")} · 엔진 ${S.engine} · 듣는 말 ${S.lang} · 건물 ${S.bld || "-"}\n\n`;
   await shareFile(new Blob([head + lines.join("\n")], { type: "text/plain" }), `자막_${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "")}.txt`);
 }
 async function saveLog() {
-  const data = { engine: S.engine, bld: S.bld, ua: navigator.userAgent, src: TEST_SRC, log: S.log };
+  const data = { engine: S.engine, bld: S.bld, lang: S.lang, ua: navigator.userAgent, src: TEST_SRC, log: S.log };
   await shareFile(new Blob([JSON.stringify(data)], { type: "application/json" }), `측정_${S.engine}_${Date.now()}.json`);
 }
 
 // ---------- 묶기 ----------
-fillEngine(); fillBuildings(); listMics();
+fillEngine(); fillBuildings(); fillLang(); listMics();
 $("pass").value = localStorage.jpiPass || "";
 $("pass").onchange = () => { localStorage.jpiPass = $("pass").value.trim(); msg("암호 저장됨"); };
 $("mic").onchange = () => { localStorage.jpiMic = $("mic").value; if (S.want) restart("마이크 바꾸는 중"); };
@@ -444,3 +487,4 @@ $("txtBtn").onclick = saveTxt;
 $("logBtn").onclick = saveLog;
 $("clrBtn").onclick = () => { $("subs").innerHTML = ""; S.blocks = []; S.cur = null; };
 if (qs.get("engine")) { S.engine = qs.get("engine"); fillEngine(); }
+if (qs.get("lang")) setLang(qs.get("lang"));

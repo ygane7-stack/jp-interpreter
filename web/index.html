@@ -20,6 +20,8 @@
   .seg { display:flex; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:3px; flex:1; }
   .seg button { flex:1; border:0; background:transparent; color:var(--dim); padding:9px 4px; border-radius:9px; font-size:14px; font-weight:600; }
   .seg button.sel { background:var(--acc); color:#04121f; }
+  #langSeg button { padding:7px 4px; font-size:13px; }
+  .skip { opacity:.45; }
   select, input[type=password], input[type=text] { width:100%; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:10px; padding:10px; font-size:16px; }
   #big { width:100%; border:0; border-radius:16px; padding:16px; font-size:19px; font-weight:700; background:var(--acc); color:#04121f; }
   #big.stop { background:var(--red); color:#fff; }
@@ -47,7 +49,7 @@
 </head>
 <body>
   <header>
-    <h1>건축 통역 <span class="small">日→韓</span></h1>
+    <h1>건축 통역 <span class="small" id="dir">日→韓</span></h1>
     <span id="st" class="pill">대기</span>
   </header>
 
@@ -55,6 +57,15 @@
     <div class="seg" id="engineSeg">
       <button data-v="openai" class="sel">GPT 동시통역</button>
       <button data-v="soniox">Soniox + 읽어주기</button>
+    </div>
+  </div>
+
+  <div class="row">
+    <span class="small">듣는 말</span>
+    <div class="seg" id="langSeg">
+      <button data-v="ja" class="sel">일본어</button>
+      <button data-v="zh">중국어만</button>
+      <button data-v="mix">일·중 모두</button>
     </div>
   </div>
 
@@ -94,7 +105,7 @@
         <button id="logBtn">측정 기록 내보내기</button>
         <button id="clrBtn">화면 지우기</button>
       </div>
-      <div class="small" id="ver">v1.0 · 2026-11-15</div>
+      <div class="small" id="ver">v1.1 · 2026-11-15 · 중국어만: 통역사의 일본어는 건너뜀(Soniox 정확, GPT 는 추정)</div>
     </div>
   </details>
 
