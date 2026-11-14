@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#111418">
+<title>건축 통역</title>
+<style>
+  :root { --bg:#111418; --card:#1b2027; --line:#2a313b; --fg:#eef1f4; --dim:#8b95a3; --ko:#ffffff; --ja:#a9b6c6; --acc:#4fb3ff; --red:#ff5d5d; --ok:#43d17a; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; background:var(--bg); color:var(--fg); font-family:-apple-system, "Apple SD Gothic Neo", "Hiragino Sans", sans-serif; }
+  body { padding: env(safe-area-inset-top) 12px calc(env(safe-area-inset-bottom) + 12px); min-height:100vh; display:flex; flex-direction:column; gap:10px; }
+  header { display:flex; align-items:center; gap:8px; padding-top:8px; }
+  header h1 { font-size:17px; margin:0; flex:1; }
+  .pill { font-size:12px; padding:3px 8px; border-radius:99px; background:var(--card); color:var(--dim); border:1px solid var(--line); }
+  .pill.on { color:var(--ok); border-color:var(--ok); }
+  .pill.err { color:var(--red); border-color:var(--red); }
+  .row { display:flex; gap:8px; align-items:center; }
+  .seg { display:flex; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:3px; flex:1; }
+  .seg button { flex:1; border:0; background:transparent; color:var(--dim); padding:9px 4px; border-radius:9px; font-size:14px; font-weight:600; }
+  .seg button.sel { background:var(--acc); color:#04121f; }
+  select, input[type=password], input[type=text] { width:100%; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:10px; padding:10px; font-size:16px; }
+  #big { width:100%; border:0; border-radius:16px; padding:16px; font-size:19px; font-weight:700; background:var(--acc); color:#04121f; }
+  #big.stop { background:var(--red); color:#fff; }
+  #subs { flex:1; min-height:42vh; overflow-y:auto; background:var(--card); border:1px solid var(--line); border-radius:14px; padding:12px; scroll-behavior:smooth; }
+  .blk { padding:8px 0; border-bottom:1px solid var(--line); }
+  .blk:last-child { border-bottom:0; }
+  .ko { color:var(--ko); font-size:21px; line-height:1.45; font-weight:600; }
+  .ja { color:var(--ja); font-size:14px; line-height:1.5; margin-top:3px; }
+  .tmp { color:var(--dim); }
+  .hint { display:inline-block; font-size:12px; margin:4px 4px 0 0; padding:2px 7px; border-radius:6px; background:#22344a; color:#bfe0ff; }
+  #meter { height:6px; background:var(--line); border-radius:3px; overflow:hidden; flex:1; }
+  #meter > div { height:100%; width:0; background:var(--ok); transition:width .08s; }
+  details { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:8px 10px; }
+  details summary { color:var(--dim); font-size:14px; }
+  .set { display:grid; gap:8px; margin-top:8px; font-size:14px; }
+  .set label { display:grid; gap:4px; color:var(--dim); }
+  .btns { display:flex; gap:8px; flex-wrap:wrap; }
+  .btns button { flex:1; min-width:30%; border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:10px; padding:10px 6px; font-size:14px; }
+  .btns button.rec { border-color:var(--red); color:var(--red); }
+  #msg { font-size:13px; color:var(--dim); min-height:18px; }
+  #msg.err { color:var(--red); }
+  .small { font-size:12px; color:var(--dim); }
+  a { color:var(--acc); }
+</style>
+</head>
+<body>
+  <header>
+    <h1>건축 통역 <span class="small">日→韓</span></h1>
+    <span id="st" class="pill">대기</span>
+  </header>
+
+  <div class="row">
+    <div class="seg" id="engineSeg">
+      <button data-v="openai" class="sel">GPT 동시통역</button>
+      <button data-v="soniox">Soniox + 읽어주기</button>
+    </div>
+  </div>
+
+  <div class="row">
+    <select id="bld" aria-label="지금 보는 건물"></select>
+  </div>
+
+  <button id="big">▶ 통역 시작</button>
+  <div class="row"><span class="small">소리</span><div id="meter"><div></div></div><span id="clock" class="small">0:00</span></div>
+  <div id="msg"></div>
+
+  <div id="subs" aria-live="polite"></div>
+
+  <div class="btns">
+    <button id="recBtn">● 원음 녹음 켜기</button>
+    <button id="saveBtn">녹음 저장</button>
+    <button id="txtBtn">자막 저장</button>
+  </div>
+
+  <details id="setBox">
+    <summary>설정</summary>
+    <div class="set">
+      <label>암호 (처음 한 번만)<input id="pass" type="password" autocomplete="off" placeholder="토미가 알려준 암호"></label>
+      <label>마이크
+        <select id="mic"><option value="">기본 마이크</option></select>
+      </label>
+      <label>주변 소리
+        <select id="noise">
+          <option value="far_field">가이드가 떨어져서 말함 (기본)</option>
+          <option value="near_field">가이드 마이크·스피커 가까이</option>
+        </select>
+      </label>
+      <label>읽어주기 빠르기 (Soniox) <input id="rate" type="range" min="0.8" max="1.6" step="0.1" value="1.15"></label>
+      <label>GPT 통역 소리 크기 <input id="vol" type="range" min="0" max="1" step="0.05" value="1"></label>
+      <label><span><input id="ttsOn" type="checkbox" checked> 한국어 소리 듣기 (끄면 자막만)</span></label>
+      <div class="btns">
+        <button id="logBtn">측정 기록 내보내기</button>
+        <button id="clrBtn">화면 지우기</button>
+      </div>
+      <div class="small" id="ver">v1.0 · 2026-11-15</div>
+    </div>
+  </details>
+
+  <audio id="out" autoplay playsinline></audio>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
