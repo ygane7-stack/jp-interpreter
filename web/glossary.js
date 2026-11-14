@@ -218,6 +218,29 @@ export function allPairs(buildingId, lang = "ja") {
   return pairs.filter(([ja]) => (seen.has(ja) ? false : seen.add(ja)));
 }
 
+// 내가 말하기(한국어 → 일본어)용 Soniox 문맥: 같은 용어집을 거꾸로(한→일) 넘긴다
+export function talkContext(buildingId) {
+  const b = BUILDINGS.find((x) => x.id === buildingId);
+  const general = [
+    { key: "domain", value: "韓国人の建築好きの旅行者が、建築ガイド・学芸員・地元の人に話しかける" },
+    { key: "style", value: "丁寧な日本語（です・ます）" },
+  ];
+  if (b) general.push({ key: "building", value: b.ja }, { key: "architect", value: b.arch });
+  const ctx = { general, text: b ? `見学中の建物: ${b.ja}（${b.arch}）` : "日本の現代建築を巡る旅行", terms: [], translation_terms: [] };
+  let size = JSON.stringify(ctx).length;
+  const seen = new Set();
+  for (const [ja, ko] of allPairs(buildingId, "ja")) {
+    const src = ko.replace(/\(.*?\)/g, "").trim();
+    if (!src || seen.has(src) || !/[가-힣]/.test(src)) continue;
+    seen.add(src);
+    const tt = { source: src, target: ja };
+    const add = src.length + 3 + JSON.stringify(tt).length + 1;
+    if (size + add > 5500) break;
+    ctx.terms.push(src); ctx.translation_terms.push(tt); size += add;
+  }
+  return ctx;
+}
+
 // Soniox context 만들기(8000 토큰 안쪽)
 export function sonioxContext(buildingId, lang = "ja") {
   const b = BUILDINGS.find((x) => x.id === buildingId);

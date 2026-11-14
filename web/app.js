@@ -1,8 +1,8 @@
-// 건축 통역 v1.1 (2026-11-15) — 일본어(·중국어) 해설 → 한국어 자막·음성
+// 건축 통역 v1.2 (2026-11-15) — 일본어(·중국어) 해설 → 한국어 자막·음성 + 내가 말하기(한국어 → 일본어 큰 글자·소리)
 // 엔진 1: OpenAI gpt-realtime-translate (WebRTC, 음성→음성)
 // 엔진 2: Soniox stt-rt-v6 받아쓰기+번역 (WebSocket) → 브라우저 읽어주기(speechSynthesis)
 // 진짜 API 키는 이 페이지에 없다. Supabase 함수(jp-interpreter-token)에서 몇 분짜리 임시 열쇠만 받는다.
-import { BUILDINGS, allPairs, sonioxContext } from "./glossary.js";
+import { BUILDINGS, allPairs, sonioxContext, talkContext } from "./glossary.js";
 
 const FUNC = "https://trjsxwcekqmlnwfyswky.supabase.co/functions/v1/jp-interpreter-token";
 const qs = new URLSearchParams(location.search);
@@ -267,6 +267,18 @@ function speak(text) {
   speechSynthesis.speak(u);
 }
 
+async function openSoniox(tok, config) {
+  const open = (withProto) => new Promise((res, rej) => {
+    const ws = withProto
+      ? new WebSocket("wss://stt-rt.soniox.com/transcribe-websocket", ["soniox-api-key", tok.api_key])
+      : new WebSocket("wss://stt-rt.soniox.com/transcribe-websocket");
+    ws.binaryType = "arraybuffer";
+    ws.onopen = () => { ws.send(JSON.stringify(withProto ? config : { ...config, api_key: tok.api_key })); res(ws); };
+    ws.onerror = () => rej(new Error("Soniox 연결 실패"));
+  });
+  try { return await open(true); } catch (_) { return await open(false); } // 머리글 방식이 막히면 옛 방식
+}
+
 async function startSoniox(stream) {
   const tok = await getToken({ engine: "soniox" });
   const config = {
@@ -277,16 +289,7 @@ async function startSoniox(stream) {
     translation: { type: "one_way", target_language: "ko" },
     context: sonioxContext(S.bld, S.lang),
   };
-  const open = (withProto) => new Promise((res, rej) => {
-    const ws = withProto
-      ? new WebSocket("wss://stt-rt.soniox.com/transcribe-websocket", ["soniox-api-key", tok.api_key])
-      : new WebSocket("wss://stt-rt.soniox.com/transcribe-websocket");
-    ws.binaryType = "arraybuffer";
-    ws.onopen = () => { ws.send(JSON.stringify(withProto ? config : { ...config, api_key: tok.api_key })); res(ws); };
-    ws.onerror = () => rej(new Error("Soniox 연결 실패"));
-  });
-  let ws;
-  try { ws = await open(true); } catch (_) { ws = await open(false); } // 머리글 방식이 막히면 옛 방식
+  const ws = await openSoniox(tok, config);
   const eng = { name: "soniox", ws, closed: false };
   let ttsBuf = "", ttsTimer = null, lastKo = "";
   const flush = () => { clearTimeout(ttsTimer); if (ttsBuf.trim()) { speak(ttsBuf); } ttsBuf = ""; };
@@ -409,6 +412,158 @@ function clockOn() {
 }
 function clockOff() { clearInterval(S.clockT); }
 
+
+// ---------- 내가 말하기 (한국어 → 일본어: 흰 화면에 큰 일본어 + 소리) ----------
+// 듣기 통역이 켜져 있으면 잠시 멈추고, 닫으면 다시 켠다. 같은 엔진(GPT/Soniox)을 쓴다.
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let jaVoice = null;
+function pickJaVoice() {
+  const vs = speechSynthesis.getVoices().filter((v) => /^ja/i.test(v.lang));
+  jaVoice = vs.find((v) => /premium|enhanced|향상/i.test(v.name)) || vs.find((v) => /kyoko|o-ren/i.test(v.name)) || vs[0] || null;
+}
+if ("speechSynthesis" in window) { pickJaVoice(); speechSynthesis.addEventListener?.("voiceschanged", pickJaVoice); }
+function speakJa(text) {
+  text = (text || "").trim();
+  if (!text || !("speechSynthesis" in window)) return;
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = "ja-JP"; if (jaVoice) u.voice = jaVoice; u.rate = 1.0;
+  speechSynthesis.speak(u);
+}
+const T = { on: false, eng: null, ko: "", ja: "", koTmp: "", jaTmp: "", spoken: 0, lastOut: 0, finished: false, resume: false };
+function talkRender() {
+  $("talkKo").textContent = T.ko + T.koTmp;
+  $("talkJa").innerHTML = esc(T.ja) + (T.jaTmp ? `<span class="tmp">${esc(T.jaTmp)}</span>` : "");
+  $("talkJa").scrollTop = $("talkJa").scrollHeight;
+}
+function talkState(t) { $("talkSt").textContent = t; }
+
+async function talkOpenAI(stream) {
+  const tok = await getToken({ engine: "openai", lang: "ja", noise: "near_field" });
+  const pc = new RTCPeerConnection();
+  const eng = { name: "openai-talk", closed: false };
+  pc.ontrack = (e) => { const o = $("out"); o.srcObject = e.streams[0]; o.muted = false; o.volume = 1; o.play().catch(() => {}); };
+  stream.getAudioTracks().forEach((t) => pc.addTrack(t, stream));
+  const dc = pc.createDataChannel("oai-events");
+  const ready = new Promise((res, rej) => { dc.onopen = res; setTimeout(() => rej(new Error("GPT 연결 시간 초과")), 15000); });
+  dc.onmessage = (m) => {
+    let ev; try { ev = JSON.parse(m.data); } catch (_) { return; }
+    if (ev.type === "session.input_transcript.delta") { T.ko += ev.delta; talkRender(); }
+    else if (ev.type === "session.output_transcript.delta") { T.ja += ev.delta; T.lastOut = performance.now(); talkRender(); }
+    else if (ev.type === "session.closed") { eng.closedRes && eng.closedRes(); }
+    else if (ev.type === "error") talkState("GPT 오류: " + (ev.error?.message || ev.error?.code || ""));
+  };
+  pc.onconnectionstatechange = () => { if (["failed", "disconnected"].includes(pc.connectionState) && !eng.closed) talkState("연결 끊김 — 닫고 다시 해 주세요"); };
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  const r = await fetch("https://api.openai.com/v1/realtime/translations/calls", {
+    method: "POST", body: offer.sdp, headers: { Authorization: `Bearer ${tok.value}`, "Content-Type": "application/sdp" },
+  });
+  if (!r.ok) throw new Error("GPT 연결 실패 " + r.status);
+  await pc.setRemoteDescription({ type: "answer", sdp: await r.text() });
+  await ready;
+  eng.finish = async () => { // 번역이 다 나올 때까지: 1.5초 조용하면 끝(최대 8초), 소리 끝나게 1초 더
+    const t0 = performance.now();
+    while (performance.now() - t0 < 8000 && performance.now() - Math.max(T.lastOut, t0) < 1500) await sleep(200);
+    await sleep(1000);
+  };
+  eng.stop = async () => {
+    eng.closed = true;
+    try { const done = new Promise((res) => { eng.closedRes = res; setTimeout(res, 2000); }); dc.send(JSON.stringify({ type: "session.close" })); await done; } catch (_) {}
+    pc.close(); $("out").srcObject = null;
+  };
+  return eng;
+}
+
+async function talkSoniox(stream) {
+  const tok = await getToken({ engine: "soniox" });
+  const ws = await openSoniox(tok, {
+    model: "stt-rt-v6", audio_format: "pcm_s16le", sample_rate: 16000, num_channels: 1,
+    language_hints: ["ko"], enable_language_identification: true,
+    enable_endpoint_detection: true, max_endpoint_delay_ms: 1000,
+    translation: { type: "one_way", target_language: "ja" },
+    context: talkContext(S.bld),
+  });
+  const eng = { name: "soniox-talk", ws, closed: false };
+  let finRes = null;
+  const speakNew = () => { const part = T.ja.slice(T.spoken); T.spoken = T.ja.length; speakJa(part); };
+  ws.onmessage = (e) => {
+    let d; try { d = JSON.parse(e.data); } catch (_) { return; }
+    if (d.error_code) { talkState(`Soniox 오류 ${d.error_code}: ${d.error_message || d.error_type}`); return; }
+    let nfKo = "", nfJa = "";
+    for (const t of d.tokens || []) {
+      if (t.text === "<end>") { speakNew(); continue; }
+      if (t.text === "<fin>") { finRes && finRes(); continue; }
+      const tr = t.translation_status === "translation";
+      if (tr ? t.source_language === "ja" : t.language === "ja") continue; // 스피커에서 나온 일본어가 다시 들어온 것은 버림
+      if (!t.is_final) { if (tr) nfJa += t.text; else nfKo += t.text; continue; }
+      if (tr) T.ja += t.text; else T.ko += t.text;
+    }
+    T.koTmp = nfKo; T.jaTmp = nfJa; talkRender();
+    if (d.finished) eng.closedRes && eng.closedRes();
+  };
+  ws.onclose = () => { if (!eng.closed) talkState("연결 끊김 — 닫고 다시 해 주세요"); };
+  eng.pcm = (buf) => { if (ws.readyState === 1) ws.send(buf); };
+  eng.finish = async () => { // 남은 말을 바로 확정 → 번역이 따라올 시간 조금 → 아직 안 읽은 일본어 읽기
+    const fin = new Promise((r) => { finRes = r; });
+    try { ws.send(JSON.stringify({ type: "finalize" })); } catch (_) {}
+    await Promise.race([fin, sleep(4000)]);
+    await sleep(700);
+    T.koTmp = ""; T.jaTmp = ""; talkRender(); speakNew();
+  };
+  eng.stop = async () => {
+    eng.closed = true;
+    try { const done = new Promise((res) => { eng.closedRes = res; setTimeout(res, 2000); }); ws.send(""); await done; } catch (_) {}
+    try { ws.close(); } catch (_) {}
+  };
+  return eng;
+}
+
+async function talkEngineOff() { // 듣기용 stopEngine 과 달리 읽어주기를 끊지 않는다
+  const e = S.live; S.live = null;
+  if (e) { try { await e.stop(); } catch (_) {} releaseStream(); }
+}
+async function talkRound() {
+  Object.assign(T, { ko: "", ja: "", koTmp: "", jaTmp: "", spoken: 0, lastOut: 0, finished: false });
+  talkRender(); talkState("연결 중…");
+  $("talkMain").textContent = "■ 다 말했어요"; $("talkMain").classList.remove("done");
+  try {
+    const stream = await getStream();
+    try { T.eng = S.engine === "openai" ? await talkOpenAI(stream) : await talkSoniox(stream); }
+    catch (e) { releaseStream(); throw e; }
+    S.live = T.eng;
+    talkState("듣는 중… 한국어로 말하세요");
+  } catch (e) { T.eng = null; talkState("오류: " + (e.message || e)); $("talkMain").textContent = "🗣 다시 말하기"; $("talkMain").classList.add("done"); T.finished = true; }
+}
+async function talkFinish() {
+  if (!T.eng || T.finished) return;
+  T.finished = true; talkState("번역 마무리 중…");
+  try { await T.eng.finish(); } catch (_) {}
+  await talkEngineOff(); T.eng = null;
+  talkState(T.ja ? "끝 — 🔊 다시 듣기로 또 들려줄 수 있어요" : "알아들은 말이 없어요 — 다시 말해 주세요");
+  $("talkMain").textContent = "🗣 다시 말하기"; $("talkMain").classList.add("done");
+  if (T.ko || T.ja) { // 자막 목록에도 남김(자막 저장에 들어감)
+    const b = newBlock(); b.el.classList.add("me"); b.ko = "🗣 나: " + T.ko; b.ja = T.ja; render(b);
+  }
+}
+async function talkOpen() {
+  if (T.on) return;
+  if (!localStorage.jpiPass && TOKEN_URL === FUNC) { $("setBox").open = true; $("pass").focus(); msg("설정에서 암호를 먼저 넣어 주세요", true); return; }
+  if (navigator.audioSession) { try { navigator.audioSession.type = "play-and-record"; } catch (_) {} }
+  if ("speechSynthesis" in window) { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; speechSynthesis.speak(u); }
+  $("out").play().catch(() => {});
+  await ensureCtx();
+  T.resume = S.want;
+  if (S.want) { S.want = false; setBtn(); await stopEngine(); clockOff(); status("대기"); }
+  T.on = true; $("talk").classList.add("on"); wakeOn();
+  await talkRound();
+}
+async function talkClose() {
+  T.finished = true;
+  if (T.eng) { await talkEngineOff(); T.eng = null; }
+  T.on = false; $("talk").classList.remove("on");
+  if (T.resume) { T.resume = false; startAll(); } else if (!S.rec) wakeOff();
+}
+
 // ---------- 원음 녹음 (IndexedDB 에 5초마다 저장 → 새로고침해도 남음) ----------
 function idb() {
   return new Promise((res, rej) => {
@@ -485,6 +640,10 @@ $("recBtn").onclick = recToggle;
 $("saveBtn").onclick = saveRec;
 $("txtBtn").onclick = saveTxt;
 $("logBtn").onclick = saveLog;
+$("talkBtn").onclick = talkOpen;
+$("talkMain").onclick = () => (T.finished ? talkRound() : talkFinish());
+$("talkSay").onclick = () => { if ("speechSynthesis" in window) speechSynthesis.cancel(); speakJa(T.ja); };
+$("talkClose").onclick = talkClose;
 $("clrBtn").onclick = () => { $("subs").innerHTML = ""; S.blocks = []; S.cur = null; };
 if (qs.get("engine")) { S.engine = qs.get("engine"); fillEngine(); }
 if (qs.get("lang")) setLang(qs.get("lang"));
