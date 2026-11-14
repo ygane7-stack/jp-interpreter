@@ -2,3 +2,4 @@ tests/dl/
 tests/build/
 tests/*.wav
 node_modules/
+supabase/.temp/
