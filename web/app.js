@@ -644,6 +644,15 @@ $("talkBtn").onclick = talkOpen;
 $("talkMain").onclick = () => (T.finished ? talkRound() : talkFinish());
 $("talkSay").onclick = () => { if ("speechSynthesis" in window) speechSynthesis.cancel(); speakJa(T.ja); };
 $("talkClose").onclick = talkClose;
+// 상대 쪽 일본어 뒤집기(기본 켬). 내가 직접 읽거나 휴대폰을 건네줄 때는 끈다. 선택은 이 휴대폰에 기억.
+function setFlip(on) {
+  $("talk").classList.toggle("flip", on);
+  $("talkFlip").textContent = on ? "↕ 뒤집기 끄기" : "↕ 상대 쪽으로 뒤집기";
+  try { localStorage.setItem("jpi_flip", on ? "1" : "0"); } catch {}
+}
+let flip0 = true; try { flip0 = localStorage.getItem("jpi_flip") !== "0"; } catch {}
+setFlip(flip0);
+$("talkFlip").onclick = () => setFlip(!$("talk").classList.contains("flip"));
 $("clrBtn").onclick = () => { $("subs").innerHTML = ""; S.blocks = []; S.cur = null; };
 if (qs.get("engine")) { S.engine = qs.get("engine"); fillEngine(); }
 if (qs.get("lang")) setLang(qs.get("lang"));
