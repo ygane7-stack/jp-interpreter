@@ -1,8 +1,9 @@
-// 건축 통역 v1.2 (2026-11-15) — 일본어(·중국어) 해설 → 한국어 자막·음성 + 내가 말하기(한국어 → 일본어 큰 글자·소리)
+// 건축 통역 v1.4 (2026-11-16) — 일본어(·중국어) 해설 → 한국어 자막·음성 + 대화(내 말 한→日 / 상대 말 日→한) + 자주 쓰는 말(인터넷 없이)
 // 엔진 1: OpenAI gpt-realtime-translate (WebRTC, 음성→음성)
 // 엔진 2: Soniox stt-rt-v6 받아쓰기+번역 (WebSocket) → 브라우저 읽어주기(speechSynthesis)
 // 진짜 API 키는 이 페이지에 없다. Supabase 함수(jp-interpreter-token)에서 몇 분짜리 임시 열쇠만 받는다.
 import { BUILDINGS, allPairs, sonioxContext, talkContext } from "./glossary.js";
+import { PHRASES } from "./phrases.js";
 
 const FUNC = "https://trjsxwcekqmlnwfyswky.supabase.co/functions/v1/jp-interpreter-token";
 const qs = new URLSearchParams(location.search);
@@ -38,8 +39,11 @@ function fillBuildings() {
   const sel = $("bld");
   const trip = BUILDINGS.filter((b) => b.day).sort((a, b) => a.day.localeCompare(b.day, "en", { numeric: true }));
   const opt = (b) => `<option value="${b.id}">${b.day ? b.day + " · " : ""}${b.ko}</option>`;
+  const d = new Date(), today = `${d.getMonth() + 1}/${d.getDate()}`; // 여행 날이면 그날 건물을 맨 위에
+  const tod = trip.filter((b) => b.day === today);
   sel.innerHTML = `<option value="">건물 선택 안 함 (전체 용어집)</option>` +
-    `<optgroup label="도쿄 일정 12/1~12/7">${trip.map(opt).join("")}</optgroup>` +
+    (tod.length ? `<optgroup label="★ 오늘 ${today}">${tod.map(opt).join("")}</optgroup>` : "") +
+    `<optgroup label="도쿄 일정 12/1~12/7">${trip.filter((b) => b.day !== today).map(opt).join("")}</optgroup>` +
     `<optgroup label="그 밖의 명소">${BUILDINGS.filter((b) => !b.day).map(opt).join("")}</optgroup>`;
   sel.value = S.bld;
   sel.onchange = () => {
@@ -100,6 +104,7 @@ function render(b) {
     b.el.querySelector(".hints").appendChild(s);
   }
   if (atBottom) box.scrollTop = box.scrollHeight;
+  dimUpdate();
 }
 
 // ---------- 입력 소리(마이크 또는 시험 파일) ----------
@@ -134,9 +139,13 @@ async function getStream() {
   const msrc = ctx.createMediaStreamSource(stream);
   msrc.connect(node);
   const mute = ctx.createGain(); mute.gain.value = 0; node.connect(mute).connect(ctx.destination);
-  let speaking = false, quiet = 0;
+  let speaking = false, quiet = 0, zero = 0;
+  // 아이폰이 읽어주기 중에 마이크를 막아 버리는 일이 있어(WebKit 버그) 완전한 무음이 4초 이어지면 마이크를 다시 켠다
+  if (!TEST_SRC) stream.getAudioTracks().forEach((t) => { t.onmute = () => { L("mute"); if (S.want && S.live && !T.on) restart("마이크가 멈춰 다시 켜는 중"); }; });
   node.port.onmessage = (e) => {
     const { pcm, db } = e.data;
+    if (S.peek) S.peek(db);
+    if (!TEST_SRC && db < -150) { if (++zero === 40 && S.want && S.live && !T.on) restart("마이크 소리가 끊겨 다시 켜는 중"); } else zero = 0;
     $("meter").firstElementChild.style.width = Math.max(0, Math.min(100, ((db + 60) / 50) * 100)) + "%";
     if (S.live && S.live.pcm) S.live.pcm(pcm);
     if (db > -42) { if (!speaking) { speaking = true; L("v1"); } quiet = 0; }
@@ -385,6 +394,7 @@ async function lost(why) {
   if (!S.want) return;
   L("lost", why);
   await stopEngine();
+  if (!navigator.onLine) { S.waitOnline = true; status("인터넷 기다림", "err"); msg("인터넷이 끊겼어요 — 다시 연결되면 저절로 이어집니다 (📋 자주 쓰는 말은 지금도 됨)", true); return; }
   if (S.retries >= 6) { msg(why + " — 다시 연결 실패. ▶ 를 다시 눌러 주세요", true); status("끊김", "err"); S.want = false; setBtn(); clockOff(); return; }
   const wait = Math.min(8000, 1000 * 2 ** S.retries++);
   status("다시 연결 중…", "err"); msg(why + ` — ${Math.round(wait / 1000)}초 뒤 다시 연결`);
@@ -413,46 +423,77 @@ function clockOn() {
 function clockOff() { clearInterval(S.clockT); }
 
 
-// ---------- 내가 말하기 (한국어 → 일본어: 흰 화면에 큰 일본어 + 소리) ----------
-// 듣기 통역이 켜져 있으면 잠시 멈추고, 닫으면 다시 켠다. 같은 엔진(GPT/Soniox)을 쓴다.
+// ---------- 대화: 내 말(한국어 → 일본어) / 상대 말(일본어 → 한국어) ----------
+// 화면 위쪽(상대 쪽, 뒤집힘)은 일본어, 아래쪽(내 쪽)은 한국어. 듣기 통역이 켜져 있으면 잠시 멈추고, 닫으면 다시 켠다.
+// 소리: 아이폰은 마이크가 켜져 있으면 소리를 수화기(귀대는 곳)로 작게 보내는 일이 있어서,
+//       번역이 다 나오면 마이크를 끄고(오디오 모드 playback) 휴대폰이 읽는다 → 에어팟을 빼면 휴대폰 스피커로 나온다.
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function setAS(type) { if (navigator.audioSession) { try { navigator.audioSession.type = type; } catch (_) {} } }
 let jaVoice = null;
 function pickJaVoice() {
   const vs = speechSynthesis.getVoices().filter((v) => /^ja/i.test(v.lang));
   jaVoice = vs.find((v) => /premium|enhanced|향상/i.test(v.name)) || vs.find((v) => /kyoko|o-ren/i.test(v.name)) || vs[0] || null;
 }
 if ("speechSynthesis" in window) { pickJaVoice(); speechSynthesis.addEventListener?.("voiceschanged", pickJaVoice); }
-function speakJa(text) {
+function unlockAudio() { // 아이폰: 손가락으로 누른 그 순간에 소리 재생을 미리 허용받는다
+  if ("speechSynthesis" in window) { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; speechSynthesis.speak(u); }
+  $("out").play().catch(() => {});
+  if (S.ctx && S.ctx.state !== "running") S.ctx.resume().catch(() => {});
+}
+function say(text, lang) { // 다 읽으면 끝나는 약속(Promise). 아이폰이 끝 알림을 안 줄 때를 대비해 시간 제한
   text = (text || "").trim();
-  if (!text || !("speechSynthesis" in window)) return;
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = "ja-JP"; if (jaVoice) u.voice = jaVoice; u.rate = 1.0;
-  speechSynthesis.speak(u);
+  return new Promise((res) => {
+    if (!text || !("speechSynthesis" in window)) return res();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = lang === "ja" ? "ja-JP" : "ko-KR";
+    const v = lang === "ja" ? jaVoice : koVoice; if (v) u.voice = v;
+    u.rate = lang === "ja" ? 0.95 : +$("rate").value;
+    let done = false; const end = () => { if (!done) { done = true; res(); } };
+    u.onend = end; u.onerror = end;
+    setTimeout(end, 2500 + text.length * 220);
+    speechSynthesis.speak(u);
+  });
 }
-const T = { on: false, eng: null, ko: "", ja: "", koTmp: "", jaTmp: "", spoken: 0, lastOut: 0, finished: false, resume: false };
-function talkRender() {
-  $("talkKo").textContent = T.ko + T.koTmp;
-  $("talkJa").innerHTML = esc(T.ja) + (T.jaTmp ? `<span class="tmp">${esc(T.jaTmp)}</span>` : "");
-  $("talkJa").scrollTop = $("talkJa").scrollHeight;
-}
-function talkState(t) { $("talkSt").textContent = t; }
+const keyReady = () => !!localStorage.jpiPass || TOKEN_URL !== FUNC;
 
-async function talkOpenAI(stream) {
-  const tok = await getToken({ engine: "openai", lang: "ja", noise: "near_field" });
+const T = { on: false, eng: null, who: "me", src: "", dst: "", srcTmp: "", dstTmp: "", lastIn: 0, lastOut: 0, t0: 0, finished: true, resume: false, gen: 0, watch: null };
+if (LOCAL) window.JPT = { T, render: () => talkRender(), state: (a, b) => talkState(a, b) }; // 맥 시험용
+const tmpSpan = (s) => (s ? `<span class="tmp">${esc(s)}</span>` : "");
+function talkRender() {
+  const me = T.who === "me";
+  $("talk").classList.toggle("them", !me);
+  $("themCap").textContent = me ? "🇰🇷→🇯🇵 韓国語からの翻訳" : "👂 あなたの日本語（聞き取り）";
+  $("meCap").textContent = me ? "🗣 내 말 (한국어)" : "👂 상대 말 → 한국어 번역";
+  $("talkJa").innerHTML = me ? esc(T.dst) + tmpSpan(T.dstTmp) : esc(T.src) + tmpSpan(T.srcTmp);
+  $("talkKo").innerHTML = me ? esc(T.src) + tmpSpan(T.srcTmp) : esc(T.dst) + tmpSpan(T.dstTmp);
+  $("talkJa").scrollTop = $("talkJa").scrollHeight; $("talkKo").scrollTop = $("talkKo").scrollHeight;
+  const act = !!T.eng && !T.finished;
+  $("meBtn").innerHTML = act && me ? "■ 다 말했어요" : "🗣 내 말<br><span>한국어 → 日本語</span>";
+  $("meBtn").classList.toggle("act", act && me);
+  $("themBtn").innerHTML = act && !me ? "■ 상대 말 끝" : "👂 상대 말<br><span>日本語 → 한국어</span>";
+  $("themBtn").classList.toggle("act", act && !me);
+  $("themBig").textContent = act && !me ? "■ 話し終わったら押してください" : "🎤 日本語で話す（押してから話してください）";
+  $("themBig").classList.toggle("act", act && !me);
+}
+function talkState(ko, ja) { $("talkSt").textContent = ko; if (ja !== undefined) $("themSt").textContent = ja; }
+
+async function talkEngOpenAI(stream, src, dst) {
+  const tok = await getToken({ engine: "openai", lang: dst, noise: "near_field" });
   const pc = new RTCPeerConnection();
   const eng = { name: "openai-talk", closed: false };
-  pc.ontrack = (e) => { const o = $("out"); o.srcObject = e.streams[0]; o.muted = false; o.volume = 1; o.play().catch(() => {}); };
+  // GPT 의 실시간 목소리는 끈다(마이크가 켜진 동안은 수화기로 작게 나갈 수 있음). 다 끝난 뒤 휴대폰이 읽는다.
+  pc.ontrack = (e) => { const o = $("out"); o.srcObject = e.streams[0]; o.muted = true; };
   stream.getAudioTracks().forEach((t) => pc.addTrack(t, stream));
   const dc = pc.createDataChannel("oai-events");
   const ready = new Promise((res, rej) => { dc.onopen = res; setTimeout(() => rej(new Error("GPT 연결 시간 초과")), 15000); });
   dc.onmessage = (m) => {
     let ev; try { ev = JSON.parse(m.data); } catch (_) { return; }
-    if (ev.type === "session.input_transcript.delta") { T.ko += ev.delta; talkRender(); }
-    else if (ev.type === "session.output_transcript.delta") { T.ja += ev.delta; T.lastOut = performance.now(); talkRender(); }
+    if (ev.type === "session.input_transcript.delta") { T.src += ev.delta; T.lastIn = performance.now(); talkRender(); }
+    else if (ev.type === "session.output_transcript.delta") { T.dst += ev.delta; T.lastOut = performance.now(); talkRender(); }
     else if (ev.type === "session.closed") { eng.closedRes && eng.closedRes(); }
     else if (ev.type === "error") talkState("GPT 오류: " + (ev.error?.message || ev.error?.code || ""));
   };
-  pc.onconnectionstatechange = () => { if (["failed", "disconnected"].includes(pc.connectionState) && !eng.closed) talkState("연결 끊김 — 닫고 다시 해 주세요"); };
+  pc.onconnectionstatechange = () => { if (["failed", "disconnected"].includes(pc.connectionState) && !eng.closed) talkState("연결 끊김 — 버튼을 다시 눌러 주세요"); };
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
   const r = await fetch("https://api.openai.com/v1/realtime/translations/calls", {
@@ -461,54 +502,52 @@ async function talkOpenAI(stream) {
   if (!r.ok) throw new Error("GPT 연결 실패 " + r.status);
   await pc.setRemoteDescription({ type: "answer", sdp: await r.text() });
   await ready;
-  eng.finish = async () => { // 번역이 다 나올 때까지: 1.5초 조용하면 끝(최대 8초), 소리 끝나게 1초 더
+  eng.finish = async () => { // 번역이 다 나올 때까지: 1.5초 동안 새 번역이 없으면 끝(최대 8초)
     const t0 = performance.now();
     while (performance.now() - t0 < 8000 && performance.now() - Math.max(T.lastOut, t0) < 1500) await sleep(200);
-    await sleep(1000);
   };
   eng.stop = async () => {
     eng.closed = true;
     try { const done = new Promise((res) => { eng.closedRes = res; setTimeout(res, 2000); }); dc.send(JSON.stringify({ type: "session.close" })); await done; } catch (_) {}
-    pc.close(); $("out").srcObject = null;
+    pc.close(); $("out").srcObject = null; $("out").muted = !$("ttsOn").checked;
   };
   return eng;
 }
 
-async function talkSoniox(stream) {
+async function talkEngSoniox(stream, src, dst) {
   const tok = await getToken({ engine: "soniox" });
   const ws = await openSoniox(tok, {
     model: "stt-rt-v6", audio_format: "pcm_s16le", sample_rate: 16000, num_channels: 1,
-    language_hints: ["ko"], enable_language_identification: true,
+    language_hints: [src], enable_language_identification: true,
     enable_endpoint_detection: true, max_endpoint_delay_ms: 1000,
-    translation: { type: "one_way", target_language: "ja" },
-    context: talkContext(S.bld),
+    translation: { type: "one_way", target_language: dst },
+    context: src === "ko" ? talkContext(S.bld) : sonioxContext(S.bld, "ja"),
   });
   const eng = { name: "soniox-talk", ws, closed: false };
-  let finRes = null;
-  const speakNew = () => { const part = T.ja.slice(T.spoken); T.spoken = T.ja.length; speakJa(part); };
+  let finRes = null, lastTmp = "";
   ws.onmessage = (e) => {
     let d; try { d = JSON.parse(e.data); } catch (_) { return; }
     if (d.error_code) { talkState(`Soniox 오류 ${d.error_code}: ${d.error_message || d.error_type}`); return; }
-    let nfKo = "", nfJa = "";
+    let nfS = "", nfD = "";
     for (const t of d.tokens || []) {
-      if (t.text === "<end>") { speakNew(); continue; }
+      if (t.text === "<end>") continue;
       if (t.text === "<fin>") { finRes && finRes(); continue; }
       const tr = t.translation_status === "translation";
-      if (tr ? t.source_language === "ja" : t.language === "ja") continue; // 스피커에서 나온 일본어가 다시 들어온 것은 버림
-      if (!t.is_final) { if (tr) nfJa += t.text; else nfKo += t.text; continue; }
-      if (tr) T.ja += t.text; else T.ko += t.text;
+      if ((tr ? t.source_language : t.language) === dst) continue; // 휴대폰에서 나온 소리가 되들어온 것 등은 버림
+      if (!t.is_final) { if (tr) nfD += t.text; else nfS += t.text; continue; }
+      if (tr) { T.dst += t.text; T.lastOut = performance.now(); } else { T.src += t.text; T.lastIn = performance.now(); }
     }
-    T.koTmp = nfKo; T.jaTmp = nfJa; talkRender();
+    if (nfS !== lastTmp) { lastTmp = nfS; if (nfS) T.lastIn = performance.now(); }
+    T.srcTmp = nfS; T.dstTmp = nfD; talkRender();
     if (d.finished) eng.closedRes && eng.closedRes();
   };
-  ws.onclose = () => { if (!eng.closed) talkState("연결 끊김 — 닫고 다시 해 주세요"); };
+  ws.onclose = () => { if (!eng.closed) talkState("연결 끊김 — 버튼을 다시 눌러 주세요"); };
   eng.pcm = (buf) => { if (ws.readyState === 1) ws.send(buf); };
-  eng.finish = async () => { // 남은 말을 바로 확정 → 번역이 따라올 시간 조금 → 아직 안 읽은 일본어 읽기
+  eng.finish = async () => { // 남은 말을 바로 확정 → 번역이 따라올 시간 조금
     const fin = new Promise((r) => { finRes = r; });
     try { ws.send(JSON.stringify({ type: "finalize" })); } catch (_) {}
     await Promise.race([fin, sleep(4000)]);
-    await sleep(700);
-    T.koTmp = ""; T.jaTmp = ""; talkRender(); speakNew();
+    await sleep(600);
   };
   eng.stop = async () => {
     eng.closed = true;
@@ -518,50 +557,191 @@ async function talkSoniox(stream) {
   return eng;
 }
 
-async function talkEngineOff() { // 듣기용 stopEngine 과 달리 읽어주기를 끊지 않는다
-  const e = S.live; S.live = null;
+async function talkStopEng() {
+  clearInterval(T.watch);
+  const e = T.eng; T.eng = null;
+  if (S.live === e) S.live = null;
   if (e) { try { await e.stop(); } catch (_) {} releaseStream(); }
 }
-async function talkRound() {
-  Object.assign(T, { ko: "", ja: "", koTmp: "", jaTmp: "", spoken: 0, lastOut: 0, finished: false });
-  talkRender(); talkState("연결 중…");
-  $("talkMain").textContent = "■ 다 말했어요"; $("talkMain").classList.remove("done");
+// 말 끝 자동 감지: 알아들은 말이 있고 1.8초(상대는 2.2초) 동안 새 말이 없으면 끝. 25초 동안 아무 말이 없으면 듣기를 멈춤(요금 아끼기)
+function talkWatch() {
+  clearInterval(T.watch);
+  T.watch = setInterval(() => {
+    if (!T.eng || T.finished) return clearInterval(T.watch);
+    const heard = (T.src + T.srcTmp).trim();
+    const idle = performance.now() - Math.max(T.lastIn, T.t0);
+    if (heard && $("autoEnd").checked && idle > (T.who === "me" ? 1800 : 2200)) talkFinish();
+    else if (!heard && idle > 25000) { talkStopEng().then(() => { T.finished = true; talkRender(); talkState("아무 말이 없어 듣기를 멈췄어요", "下のボタンを押して話してください"); }); }
+  }, 250);
+}
+async function talkTurn(who) {
+  if (!keyReady()) { talkState("설정에서 암호를 먼저 넣어 주세요 (📋 자주 쓰는 말은 암호 없이 됩니다)"); return; }
+  if (!navigator.onLine) { talkState("인터넷이 없어요 — 📋 자주 쓰는 말을 쓰세요", "インターネットに接続できません"); return; }
+  const gen = ++T.gen;
+  if ("speechSynthesis" in window) speechSynthesis.cancel();
+  await talkStopEng();
+  Object.assign(T, { who, src: "", dst: "", srcTmp: "", dstTmp: "", lastIn: 0, lastOut: 0, t0: performance.now(), finished: false });
+  talkRender(); talkState("연결 중…", "接続中…");
+  const [src, dst] = who === "me" ? ["ko", "ja"] : ["ja", "ko"];
+  setAS("play-and-record");
   try {
     const stream = await getStream();
-    try { T.eng = S.engine === "openai" ? await talkOpenAI(stream) : await talkSoniox(stream); }
+    let eng;
+    try { eng = S.engine === "openai" ? await talkEngOpenAI(stream, src, dst) : await talkEngSoniox(stream, src, dst); }
     catch (e) { releaseStream(); throw e; }
-    S.live = T.eng;
-    talkState("듣는 중… 한국어로 말하세요");
-  } catch (e) { T.eng = null; talkState("오류: " + (e.message || e)); $("talkMain").textContent = "🗣 다시 말하기"; $("talkMain").classList.add("done"); T.finished = true; }
+    if (gen !== T.gen || !T.on) { try { await eng.stop(); } catch (_) {} releaseStream(); return; }
+    T.eng = eng; S.live = eng; T.t0 = performance.now();
+    talkState(who === "me" ? "듣는 중… 한국어로 말하세요" : "상대 말 듣는 중… (일본어)",
+      who === "me" ? "韓国語で話しています。少々お待ちください" : "どうぞ、日本語で話してください");
+    talkRender(); talkWatch();
+  } catch (e) {
+    if (gen !== T.gen) return;
+    T.finished = true; T.eng = null; talkRender();
+    talkState("오류: " + (e.message || e), "エラーが発生しました");
+  }
+}
+function logTurn() { // 자막 목록에도 남김(자막 저장에 들어감)
+  const b = newBlock(); b.el.classList.add(T.who === "me" ? "me" : "them");
+  if (T.who === "me") { b.ko = "🗣 나: " + T.src.trim(); b.ja = T.dst.trim(); }
+  else { b.ko = "👂 상대: " + T.dst.trim(); b.ja = T.src.trim(); }
+  render(b);
 }
 async function talkFinish() {
   if (!T.eng || T.finished) return;
-  T.finished = true; talkState("번역 마무리 중…");
+  T.finished = true; clearInterval(T.watch);
+  const gen = T.gen, who = T.who;
+  talkState("번역 마무리 중…", "翻訳しています…"); talkRender();
   try { await T.eng.finish(); } catch (_) {}
-  await talkEngineOff(); T.eng = null;
-  talkState(T.ja ? "끝 — 🔊 다시 듣기로 또 들려줄 수 있어요" : "알아들은 말이 없어요 — 다시 말해 주세요");
-  $("talkMain").textContent = "🗣 다시 말하기"; $("talkMain").classList.add("done");
-  if (T.ko || T.ja) { // 자막 목록에도 남김(자막 저장에 들어감)
-    const b = newBlock(); b.el.classList.add("me"); b.ko = "🗣 나: " + T.ko; b.ja = T.ja; render(b);
+  await talkStopEng();
+  if (gen !== T.gen) return;
+  T.srcTmp = ""; T.dstTmp = ""; talkRender();
+  if (!T.dst.trim()) {
+    talkState(T.src.trim() ? "번역이 안 나왔어요 — 다시 해 주세요" : "알아들은 말이 없어요 — 다시 해 주세요", "すみません、もう一度お願いします");
+    return;
   }
+  logTurn();
+  setAS("playback"); // 마이크를 끈 뒤에 읽는다 → 에어팟을 빼 두면 휴대폰 스피커로 나감
+  if ($("talkVoice").checked) {
+    talkState(who === "me" ? "🔊 일본어로 읽는 중…" : "🔊 한국어로 읽는 중…", who === "me" ? "🔊" : "翻訳を読み上げています…");
+    await say(T.dst, who === "me" ? "ja" : "ko");
+  }
+  if (gen !== T.gen || !T.on) return;
+  if (who === "me" && $("autoTurn").checked) { await sleep(250); if (gen === T.gen && T.on) talkTurn("them"); return; }
+  talkState(who === "me" ? "끝 — 🔊 다시 듣기 · 👂 상대 말" : "끝 — 🗣 내 말로 대답하세요", who === "me" ? "下のボタンを押して日本語で話してください" : "ありがとうございます");
 }
-async function talkOpen() {
-  if (T.on) return;
-  if (!localStorage.jpiPass && TOKEN_URL === FUNC) { $("setBox").open = true; $("pass").focus(); msg("설정에서 암호를 먼저 넣어 주세요", true); return; }
-  if (navigator.audioSession) { try { navigator.audioSession.type = "play-and-record"; } catch (_) {} }
-  if ("speechSynthesis" in window) { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; speechSynthesis.speak(u); }
-  $("out").play().catch(() => {});
-  await ensureCtx();
-  T.resume = S.want;
-  if (S.want) { S.want = false; setBtn(); await stopEngine(); clockOff(); status("대기"); }
-  T.on = true; $("talk").classList.add("on"); wakeOn();
-  await talkRound();
+async function talkOpen(start = true) {
+  unlockAudio();
+  if (!T.on) {
+    T.on = true; $("talk").classList.add("on"); wakeOn();
+    Object.assign(T, { who: "me", src: "", dst: "", srcTmp: "", dstTmp: "", finished: true });
+    talkRender(); talkState("🗣 내 말 / 👂 상대 말을 누르세요", "下のボタンを押して日本語で話してください");
+    T.resume = S.want;
+    if (S.want) { S.want = false; setBtn(); await stopEngine(); clockOff(); status("대기"); }
+  }
+  if (start) await talkTurn("me");
 }
 async function talkClose() {
-  T.finished = true;
-  if (T.eng) { await talkEngineOff(); T.eng = null; }
+  T.gen++; T.finished = true;
+  await talkStopEng();
+  if ("speechSynthesis" in window) speechSynthesis.cancel();
   T.on = false; $("talk").classList.remove("on");
   if (T.resume) { T.resume = false; startAll(); } else if (!S.rec) wakeOff();
+}
+function talkBtn(who) { // 같은 차례가 듣는 중이면 "끝", 아니면 그 차례 시작
+  unlockAudio();
+  if (T.eng && !T.finished && T.who === who) talkFinish(); else talkTurn(who);
+}
+async function talkReplay() {
+  if (!T.dst.trim()) return;
+  unlockAudio(); if ("speechSynthesis" in window) speechSynthesis.cancel();
+  if (T.eng && !T.finished) return; // 듣는 중에는 읽지 않음(소리가 다시 들어감)
+  setAS("playback"); await say(T.dst, T.who === "me" ? "ja" : "ko");
+}
+
+// ---------- 자주 쓰는 말 (미리 번역, 인터넷 없이도 됨) + 내가 저장한 말 ----------
+function myPhrases() { try { return JSON.parse(localStorage.jpiMy || "[]"); } catch (_) { return []; } }
+function saveMine() {
+  if (T.who !== "me" || !T.finished || !T.src.trim() || !T.dst.trim()) return talkState("내 말을 번역한 뒤에 ⭐ 저장할 수 있어요");
+  const my = myPhrases().filter((p) => p[1] !== T.dst.trim());
+  my.unshift([T.src.trim(), T.dst.trim()]);
+  localStorage.jpiMy = JSON.stringify(my.slice(0, 60));
+  talkState("⭐ 자주 쓰는 말 맨 위에 저장했어요 (인터넷 없이도 다시 쓸 수 있어요)");
+}
+function fillPhrases() {
+  const my = myPhrases();
+  const item = (ko, ja, i) => `<button class="ph" data-ko="${esc(ko).replace(/"/g, "&quot;")}" data-ja="${esc(ja).replace(/"/g, "&quot;")}">` +
+    `<b>${esc(ko)}</b><small>${esc(ja)}</small>${i !== undefined ? `<i data-del="${i}">✕</i>` : ""}</button>`;
+  let h = "";
+  if (my.length) h += `<h3>⭐ 내가 저장한 말</h3>` + my.map(([ko, ja], i) => item(ko, ja, i)).join("");
+  for (const g of PHRASES) h += `<h3>${g.cat}</h3>` + g.items.map(([ko, ja]) => item(ko, ja)).join("");
+  $("phList").innerHTML = h;
+}
+function openPhrases() { unlockAudio(); fillPhrases(); $("phr").classList.add("on"); }
+function closePhrases() { $("phr").classList.remove("on"); }
+async function showPhrase(ko, ja) {
+  closePhrases();
+  if (!T.on) talkOpen(false); // 손가락 누른 순간에 바로(소리 허용)
+  T.gen++; const gen = T.gen;
+  await talkStopEng();
+  Object.assign(T, { who: "me", src: ko, dst: ja, srcTmp: "", dstTmp: "", finished: true });
+  talkRender(); logTurn();
+  setAS("playback"); talkState("🔊 일본어로 읽는 중…", "🔊");
+  await say(ja, "ja");
+  if (gen !== T.gen || !T.on) return;
+  if ($("autoTurn").checked && keyReady() && navigator.onLine) { await sleep(250); if (gen === T.gen && T.on) return talkTurn("them"); }
+  talkState("끝 — 🔊 다시 듣기 · 👂 상대 말", "下のボタンを押して日本語で話してください");
+}
+$("phList").addEventListener("click", (e) => {
+  const del = e.target.closest("[data-del]");
+  if (del) { e.stopPropagation(); const my = myPhrases(); my.splice(+del.dataset.del, 1); localStorage.jpiMy = JSON.stringify(my); fillPhrases(); return; }
+  const b = e.target.closest(".ph"); if (!b) return;
+  unlockAudio(); showPhrase(b.dataset.ko, b.dataset.ja);
+});
+
+// ---------- 절전 화면 (검은 화면 + 최신 자막만 흐리게: 아이폰 13 Pro 는 검은 화면에서 전기를 덜 씀) ----------
+function dimOn() { $("dim").classList.add("on"); dimUpdate(); }
+function dimUpdate() {
+  if (!$("dim").classList.contains("on")) return;
+  const b = S.cur; $("dimTxt").textContent = b ? (b.ko + (b.koTmp || "")).slice(-120) : "통역을 기다리는 중";
+}
+
+// ---------- 출발 전 점검 ----------
+async function preflight() {
+  const box = $("chk"), rows = [];
+  const add = (ok, t) => { rows.push(`${ok === true ? "✅" : ok === false ? "❌" : "⚠️"} ${t}`); box.innerHTML = rows.join("<br>"); };
+  box.textContent = "점검 중…"; unlockAudio();
+  add(navigator.onLine, navigator.onLine ? "인터넷 연결됨" : "인터넷 없음 (📋 자주 쓰는 말만 됩니다)");
+  try {
+    const d = await (await fetch(FUNC + "?r=ping")).json(); const h = d.has || {};
+    add(h.SONIOX_API_KEY ? true : null, "Soniox 엔진 열쇠 " + (h.SONIOX_API_KEY ? "준비됨" : "아직 없음"));
+    add(h.OPENAI_API_KEY ? true : null, "GPT 엔진 열쇠 " + (h.OPENAI_API_KEY ? "준비됨" : "아직 없음"));
+    const eng = h.SONIOX_API_KEY ? "soniox" : h.OPENAI_API_KEY ? "openai" : null;
+    if (eng && h.JPI_PASSCODE) {
+      try { await getToken({ engine: eng, lang: "ko", noise: "far_field" }); add(true, "내 암호 맞음 — 통역 시작 가능"); }
+      catch (e) { add(false, "암호 확인 실패: " + (e.message || e)); }
+      if (!h[S.engine === "openai" ? "OPENAI_API_KEY" : "SONIOX_API_KEY"]) add(false, `지금 고른 엔진(${S.engine === "openai" ? "GPT" : "Soniox"})은 열쇠가 없어요 — 위에서 다른 엔진을 고르세요`);
+    } else add(null, "열쇠가 들어오면 암호도 여기서 확인합니다");
+  } catch (_) { add(false, "통역 서버에 닿지 않음"); }
+  try {
+    setAS("play-and-record");
+    let max = -200; S.peek = (db) => { if (db > max) max = db; };
+    const st = await getStream();
+    add(null, "🎤 3초 동안 아무 말이나 해 보세요…");
+    await sleep(3000);
+    const label = st.getAudioTracks()[0]?.label || "알 수 없음";
+    S.peek = null; releaseStream(); rows.pop();
+    add(max > -45, `마이크: ${label} · 소리 크기 ${Math.round(max)}dB ${max > -45 ? "(잘 들림)" : "(너무 작음 — 마이크 가까이)"}`);
+  } catch (e) { S.peek = null; add(false, "마이크 사용 불가: " + (e.message || e) + " — 설정 > Safari > 마이크 허용"); }
+  pickVoice(); pickJaVoice();
+  add(!!koVoice, "한국어 목소리: " + (koVoice?.name || "없음"));
+  add(!!jaVoice, "일본어 목소리: " + (jaVoice?.name || "없음 — 설정 > 손쉬운 사용 > 읽기 및 말하기 > 음성에서 일본어 받기"));
+  add("wakeLock" in navigator ? true : null, "wakeLock" in navigator ? "화면 꺼짐 막기 됨" : "화면 꺼짐 막기 안 됨 — 설정 > 디스플레이 > 자동 잠금 '안 함'");
+  try { const est = await navigator.storage?.estimate?.(); if (est) add(true, `저장 공간 여유 약 ${Math.round((est.quota - est.usage) / 1e6).toLocaleString()}MB (원음 녹음 1시간 ≈ 29MB)`); } catch (_) {}
+  const sa = matchMedia("(display-mode: standalone)").matches || navigator.standalone;
+  add(sa ? true : null, sa ? "홈 화면 앱으로 실행 중" : "홈 화면에 추가하면 주소창 없이 크게 쓸 수 있어요 (공유 → 홈 화면에 추가)");
+  setAS("playback");
+  add(null, "🔊 소리 시험: 한국어와 일본어가 차례로 들리면 정상");
+  await say("한국어 소리 시험입니다.", "ko"); await say("日本語の音声テストです。", "ja");
 }
 
 // ---------- 원음 녹음 (IndexedDB 에 5초마다 저장 → 새로고침해도 남음) ----------
@@ -640,10 +820,19 @@ $("recBtn").onclick = recToggle;
 $("saveBtn").onclick = saveRec;
 $("txtBtn").onclick = saveTxt;
 $("logBtn").onclick = saveLog;
-$("talkBtn").onclick = talkOpen;
-$("talkMain").onclick = () => (T.finished ? talkRound() : talkFinish());
-$("talkSay").onclick = () => { if ("speechSynthesis" in window) speechSynthesis.cancel(); speakJa(T.ja); };
+$("talkBtn").onclick = () => talkOpen(true);
+$("meBtn").onclick = () => talkBtn("me");
+$("themBtn").onclick = () => talkBtn("them");
+$("themBig").onclick = () => talkBtn("them");
+$("talkSay").onclick = talkReplay;
+$("talkStar").onclick = saveMine;
+$("talkPh").onclick = openPhrases;
 $("talkClose").onclick = talkClose;
+$("phrBtn").onclick = openPhrases;
+$("phClose").onclick = closePhrases;
+$("dimBtn").onclick = dimOn;
+$("dim").onclick = () => $("dim").classList.remove("on");
+$("chkBtn").onclick = preflight;
 // 상대 쪽 일본어 뒤집기(기본 켬). 내가 직접 읽거나 휴대폰을 건네줄 때는 끈다. 선택은 이 휴대폰에 기억.
 function setFlip(on) {
   $("talk").classList.toggle("flip", on);
@@ -653,6 +842,28 @@ function setFlip(on) {
 let flip0 = true; try { flip0 = localStorage.getItem("jpi_flip") !== "0"; } catch {}
 setFlip(flip0);
 $("talkFlip").onclick = () => setFlip(!$("talk").classList.contains("flip"));
+// 켜고 끄는 설정은 이 휴대폰에 기억
+for (const id of ["ttsOn", "autoEnd", "autoTurn", "talkVoice"]) {
+  const el = $(id), k = "jpiChk_" + id;
+  if (localStorage[k]) el.checked = localStorage[k] === "1";
+  el.addEventListener("change", () => { localStorage[k] = el.checked ? "1" : "0"; });
+}
+$("out").muted = !$("ttsOn").checked;
+for (const id of ["rate", "vol"]) { const el = $(id); if (localStorage["jpiR_" + id]) el.value = localStorage["jpiR_" + id]; el.addEventListener("input", () => { localStorage["jpiR_" + id] = el.value; }); }
+// 자막 글자 크기
+function setFs(v) { document.documentElement.style.setProperty("--fs", v + "px"); localStorage.jpiFs = v; }
+$("fs").value = localStorage.jpiFs || 21; setFs($("fs").value);
+$("fs").oninput = () => setFs($("fs").value);
+// 인터넷 끊김·다시 연결
+window.addEventListener("offline", () => { if (!S.want) msg("인터넷 끊김 — 📋 자주 쓰는 말은 인터넷 없이도 됩니다", true); });
+window.addEventListener("online", async () => {
+  msg("인터넷 다시 연결됨");
+  if (S.waitOnline && S.want && !S.live) { S.waitOnline = false; S.retries = 0; try { await startEngine(); msg("다시 연결됨"); } catch (e) { lost(String(e.message || e)); } }
+});
+// 첫 손가락 터치에 소리 허용(아이폰)
+document.addEventListener("touchend", () => unlockAudio(), { once: true });
+// 홈 화면 앱 + 인터넷 없을 때도 화면이 열리게(파일을 휴대폰에 보관)
+if ("serviceWorker" in navigator && !qs.get("nosw")) navigator.serviceWorker.register("sw.js").catch(() => {});
 $("clrBtn").onclick = () => { $("subs").innerHTML = ""; S.blocks = []; S.cur = null; };
 if (qs.get("engine")) { S.engine = qs.get("engine"); fillEngine(); }
 if (qs.get("lang")) setLang(qs.get("lang"));

@@ -5,9 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#111418">
+<meta name="apple-mobile-web-app-title" content="건축통역">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-180.png">
 <title>건축 통역</title>
 <style>
-  :root { --bg:#111418; --card:#1b2027; --line:#2a313b; --fg:#eef1f4; --dim:#8b95a3; --ko:#ffffff; --ja:#a9b6c6; --acc:#4fb3ff; --red:#ff5d5d; --ok:#43d17a; }
+  :root { --fs:21px; --bg:#111418; --card:#1b2027; --line:#2a313b; --fg:#eef1f4; --dim:#8b95a3; --ko:#ffffff; --ja:#a9b6c6; --acc:#4fb3ff; --red:#ff5d5d; --ok:#43d17a; }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html,body { margin:0; background:var(--bg); color:var(--fg); font-family:-apple-system, "Apple SD Gothic Neo", "Hiragino Sans", sans-serif; }
   body { padding: env(safe-area-inset-top) 12px calc(env(safe-area-inset-bottom) + 12px); min-height:100vh; display:flex; flex-direction:column; gap:10px; }
@@ -36,12 +40,41 @@
   /* 위쪽 = 상대 쪽(맞은편에서 읽도록 180도 뒤집음), 아래쪽 = 내 쪽 */
   #talkThem { flex:1; min-height:0; display:flex; flex-direction:column; gap:6px; border-bottom:2px dashed #ddd; padding-bottom:10px; }
   #talk.flip #talkThem { transform:rotate(180deg); border-bottom:0; border-top:2px dashed #ddd; padding:10px 0 0; }
-  #talkThem .cap { font-size:13px; color:#888; font-family:"Hiragino Sans",sans-serif; }
-  #talkMe { display:flex; flex-direction:column; gap:10px; }
-  #talkKo { font-size:16px; color:#333; min-height:22px; max-height:20vh; overflow-y:auto; line-height:1.5; }
+  #talkThem .cap, #themSt { font-size:13px; color:#888; font-family:"Hiragino Sans",sans-serif; }
+  #themSt { color:#2b7de9; font-weight:600; }
+  #talkMe { display:flex; flex-direction:column; gap:8px; }
+  #meCap { font-size:12px; color:#888; }
+  #talkKo { font-size:16px; color:#333; min-height:22px; max-height:22vh; overflow-y:auto; line-height:1.5; }
+  #talk.them #talkKo { font-size:24px; font-weight:700; color:#000; }
   #talkJa { flex:1; overflow-y:auto; font-size:34px; line-height:1.45; font-weight:700; font-family:"Hiragino Sans","Hiragino Kaku Gothic ProN",sans-serif; color:#000; }
-  #talkJa .tmp { color:#999; }
-  #talkFlip { border:1px solid #ccc; background:#fff; color:#333; border-radius:8px; padding:4px 8px; font-size:12px; }
+  #talk.them #talkJa { font-size:24px; color:#444; }
+  #talkJa .tmp, #talkKo .tmp { color:#999; }
+  #themBig { border:0; border-radius:14px; padding:14px 8px; font-size:17px; font-weight:700; background:#2b7de9; color:#fff; font-family:"Hiragino Sans",sans-serif; }
+  #themBig.act { background:#d93c3c; }
+  #talkFlip { border:1px solid #ccc; background:#fff; color:#333; border-radius:8px; padding:4px 8px; font-size:12px; flex:none; }
+  #talk .tb button span { font-size:11px; font-weight:500; opacity:.8; }
+  #talk .tb button.turn { background:#2b7de9; color:#fff; line-height:1.25; }
+  #talk .tb button.turn.act { background:#d93c3c; }
+  #talk .tb.small button { padding:11px 4px; font-size:14px; }
+  /* 자주 쓰는 말 */
+  #phr { position:fixed; inset:0; z-index:20; background:var(--bg); display:none; flex-direction:column; padding:calc(env(safe-area-inset-top) + 10px) 12px calc(env(safe-area-inset-bottom) + 10px); gap:8px; }
+  #phr.on { display:flex; }
+  #phr .top { display:flex; align-items:center; gap:8px; }
+  #phr .top b { flex:1; font-size:17px; }
+  #phr .top button { border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:10px; padding:8px 14px; font-size:15px; }
+  #phList { flex:1; overflow-y:auto; }
+  #phList h3 { font-size:13px; color:var(--dim); margin:14px 2px 6px; }
+  .ph { position:relative; display:block; width:100%; text-align:left; border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:10px; padding:10px 34px 10px 12px; margin-bottom:6px; }
+  .ph b { display:block; font-size:16px; font-weight:600; }
+  .ph small { display:block; font-size:13px; color:var(--ja); margin-top:2px; }
+  .ph i { position:absolute; right:6px; top:8px; font-style:normal; color:var(--dim); padding:4px 8px; }
+  /* 절전 화면 */
+  #dim { position:fixed; inset:0; z-index:30; background:#000; display:none; flex-direction:column; justify-content:flex-end; padding:24px 18px calc(env(safe-area-inset-bottom) + 30px); }
+  #dim.on { display:flex; }
+  #dimTxt { color:#6b6b6b; font-size:24px; line-height:1.5; font-weight:600; }
+  #dim .small { color:#3a3a3a; margin-top:14px; }
+  #chk { font-size:13px; line-height:1.7; color:var(--fg); }
+  .blk.them .ko { color:#ffd27a; }
   #talkNote { font-size:12px; color:#a15c00; background:#fff4e0; border-radius:8px; padding:8px 10px; line-height:1.5; }
   #talk .tb { display:flex; gap:8px; }
   #talk .tb button { flex:1; border:0; border-radius:14px; padding:15px 6px; font-size:16px; font-weight:700; background:#eef1f4; color:#111; }
@@ -50,7 +83,7 @@
   #subs { flex:1; min-height:42vh; overflow-y:auto; background:var(--card); border:1px solid var(--line); border-radius:14px; padding:12px; scroll-behavior:smooth; }
   .blk { padding:8px 0; border-bottom:1px solid var(--line); }
   .blk:last-child { border-bottom:0; }
-  .ko { color:var(--ko); font-size:21px; line-height:1.45; font-weight:600; }
+  .ko { color:var(--ko); font-size:var(--fs); line-height:1.45; font-weight:600; }
   .ja { color:var(--ja); font-size:14px; line-height:1.5; margin-top:3px; }
   .tmp { color:var(--dim); }
   .hint { display:inline-block; font-size:12px; margin:4px 4px 0 0; padding:2px 7px; border-radius:6px; background:#22344a; color:#bfe0ff; }
@@ -62,6 +95,7 @@
   .set label { display:grid; gap:4px; color:var(--dim); }
   .btns { display:flex; gap:8px; flex-wrap:wrap; }
   .btns button { flex:1; min-width:30%; border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:10px; padding:10px 6px; font-size:14px; }
+  .btnwide { border:1px solid var(--acc); background:var(--card); color:var(--fg); border-radius:10px; padding:11px; font-size:14px; }
   .btns button.rec { border-color:var(--red); color:var(--red); }
   #msg { font-size:13px; color:var(--dim); min-height:18px; }
   #msg.err { color:var(--red); }
@@ -97,7 +131,7 @@
 
   <div class="row">
     <button id="big">▶ 통역 시작</button>
-    <button id="talkBtn">🗣 내가 말하기<br><span class="small">한국어 → 日本語</span></button>
+    <button id="talkBtn">💬 대화<br><span class="small">한국어 ⇄ 日本語</span></button>
   </div>
   <div class="row"><span class="small">소리</span><div id="meter"><div></div></div><span id="clock" class="small">0:00</span></div>
   <div id="msg"></div>
@@ -105,6 +139,8 @@
   <div id="subs" aria-live="polite"></div>
 
   <div class="btns">
+    <button id="phrBtn">📋 자주 쓰는 말</button>
+    <button id="dimBtn">🌙 절전 화면</button>
     <button id="recBtn">● 원음 녹음 켜기</button>
     <button id="saveBtn">녹음 저장</button>
     <button id="txtBtn">자막 저장</button>
@@ -126,29 +162,55 @@
       <label>읽어주기 빠르기 (Soniox) <input id="rate" type="range" min="0.8" max="1.6" step="0.1" value="1.15"></label>
       <label>GPT 통역 소리 크기 <input id="vol" type="range" min="0" max="1" step="0.05" value="1"></label>
       <label><span><input id="ttsOn" type="checkbox" checked> 한국어 소리 듣기 (끄면 자막만)</span></label>
+      <label>자막 글자 크기 <input id="fs" type="range" min="16" max="32" step="1" value="21"></label>
+      <div class="small">대화</div>
+      <label><span><input id="autoEnd" type="checkbox" checked> 말이 멈추면 저절로 번역 끝내기 (끄면 ■ 버튼으로)</span></label>
+      <label><span><input id="autoTurn" type="checkbox" checked> 내 말 읽은 뒤 상대 대답을 저절로 듣기</span></label>
+      <label><span><input id="talkVoice" type="checkbox" checked> 번역을 소리로 읽기</span></label>
+      <button id="chkBtn" class="btnwide">🧳 출발 전 점검 (마이크·목소리·열쇠·저장 공간)</button>
+      <div id="chk"></div>
       <div class="btns">
         <button id="logBtn">측정 기록 내보내기</button>
         <button id="clrBtn">화면 지우기</button>
       </div>
-      <div class="small" id="ver">v1.3 · 2026-11-15 · 내가 말하기(한→日, 상대 쪽 뒤집힘) · 중국어만: 통역사의 일본어는 건너뜀(Soniox 정확, GPT 는 추정)</div>
+      <div class="small" id="ver">v1.4 · 2026-11-16 · 대화(한⇄日)·자주 쓰는 말·홈 화면 앱·출발 전 점검 · 중국어만: 통역사의 일본어는 건너뜀(Soniox 정확, GPT 는 추정)</div>
     </div>
   </details>
 
-  <div id="talk" class="flip" role="dialog" aria-label="내가 말하기">
+  <div id="talk" class="flip" role="dialog" aria-label="대화">
     <div id="talkThem">
-      <div class="cap">🇰🇷→🇯🇵 翻訳（韓国語から）</div>
+      <div id="themSt">下のボタンを押して日本語で話してください</div>
+      <div class="cap" id="themCap">🇰🇷→🇯🇵 韓国語からの翻訳</div>
       <div id="talkJa"></div>
+      <button id="themBig">🎤 日本語で話す（押してから話してください）</button>
     </div>
     <div id="talkMe">
-    <div class="top"><span id="talkSt">듣는 중… 한국어로 말하세요</span><button id="talkFlip">↕ 뒤집기 끄기</button></div>
-    <div id="talkKo"></div>
-    <div id="talkNote">위쪽 일본어는 맞은편 사람이 읽도록 거꾸로 보입니다. 휴대폰을 상대와 나 사이에 놓거나 위쪽을 상대에게 향하세요. 에어팟을 끼고 있으면 소리가 에어팟으로 나가니, 들려주려면 두 쪽을 모두 빼세요(휴대폰 스피커).</div>
-    <div class="tb">
-      <button id="talkMain" class="main">■ 다 말했어요</button>
-      <button id="talkSay">🔊 다시 듣기</button>
-      <button id="talkClose">닫기</button>
+      <div class="top"><span id="talkSt">🗣 내 말 / 👂 상대 말을 누르세요</span><button id="talkFlip">↕ 뒤집기 끄기</button></div>
+      <div id="meCap">🗣 내 말 (한국어)</div>
+      <div id="talkKo"></div>
+      <div id="talkNote">위쪽은 맞은편 사람이 읽도록 거꾸로 보입니다. 번역은 말이 끝나면 휴대폰이 읽어 줍니다 — 에어팟을 끼고 있으면 에어팟으로, 두 쪽을 빼면 휴대폰 스피커로 나옵니다.</div>
+      <div class="tb">
+        <button id="meBtn" class="turn">🗣 내 말<br><span>한국어 → 日本語</span></button>
+        <button id="themBtn" class="turn">👂 상대 말<br><span>日本語 → 한국어</span></button>
+      </div>
+      <div class="tb small">
+        <button id="talkSay">🔊 다시</button>
+        <button id="talkPh">📋 문장</button>
+        <button id="talkStar">⭐ 저장</button>
+        <button id="talkClose">닫기</button>
+      </div>
     </div>
-    </div>
+  </div>
+
+  <div id="phr" role="dialog" aria-label="자주 쓰는 말">
+    <div class="top"><b>📋 자주 쓰는 말</b><button id="phClose">닫기</button></div>
+    <div class="small">누르면 일본어를 크게 보여 주고 읽어 줍니다. 인터넷·열쇠 없이도 됩니다. 대화 중 ⭐ 저장한 말은 맨 위에 모입니다(✕ 로 지우기).</div>
+    <div id="phList"></div>
+  </div>
+
+  <div id="dim" role="dialog" aria-label="절전 화면">
+    <div id="dimTxt"></div>
+    <div class="small">절전 화면 — 통역은 계속됩니다. 아무 데나 누르면 돌아갑니다.</div>
   </div>
 
   <audio id="out" autoplay playsinline></audio>
