@@ -10,7 +10,7 @@ import url from "node:url";
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), "..");
 const FUNC = "https://trjsxwcekqmlnwfyswky.supabase.co/functions/v1/jp-interpreter-token";
 const PORT = +process.env.PORT || 8787;
-const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".json": "application/json", ".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4" };
+const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".json": "application/json", ".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".png": "image/png" };
 
 function pass() {
   try { return execFileSync("security", ["find-generic-password", "-s", "jpi-passcode", "-w"]).toString().trim(); }
