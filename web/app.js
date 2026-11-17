@@ -141,7 +141,7 @@ function gptAdd(delta) {
 function newBlock() {
   const el = document.createElement("div");
   el.className = "blk";
-  el.innerHTML = `<div class="ko"></div><div class="ja"></div><div class="hints"></div>`;
+  el.innerHTML = `<div class="spk"></div><div class="ko"></div><div class="ja"></div><div class="hints"></div>`;
   $("subs").appendChild(el);
   const b = { el, ja: "", ko: "", jaTmp: "", koTmp: "", hints: new Set(), t: now(), at: Date.now(), closing: false };
   S.blocks.push(b); S.cur = b;
@@ -151,6 +151,10 @@ function newBlock() {
 function esc(s) { return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]); }
 function render(b) {
   const box = $("subs");
+  if (b.spk && b.el.dataset.spk !== String(b.spk)) { // 화자 구분(Soniox): 사람마다 색과 이름표
+    b.el.dataset.spk = b.spk; const sp = b.el.querySelector(".spk");
+    if (sp) { sp.textContent = `🗣 화자 ${b.spk}`; sp.className = "spk s" + (((+b.spk || 1) - 1) % 4); }
+  }
   const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
   b.el.querySelector(".ko").innerHTML = esc(b.ko) + (b.koTmp ? `<span class="tmp">${esc(b.koTmp)}</span>` : "") +
     (b.skipKo ? ` <span class="skip">(통역사 부분: ${esc(b.skipKo)})</span>` : "");
@@ -366,6 +370,7 @@ async function startSoniox(stream) {
     enable_language_identification: true, // 🎯 고른 말만 통역하려면 말마다 언어를 알아야 함
     enable_endpoint_detection: true, max_endpoint_delay_ms: 1200,
     translation: { type: "one_way", target_language: "ko" },
+    enable_speaker_diarization: $("spkOn").checked, // 화자 구분: 말한 사람이 바뀌면 "화자 1·2…" 로 나눔
     context: sonioxContext(S.bld, S.lang),
   };
   const ws = await openSoniox(tok, config);
@@ -391,12 +396,18 @@ async function startSoniox(stream) {
       }
       if (tr) {
         if (!S.cur) newBlock();
-        S.cur.ko += t.text; L("k", t.text);
+        // 화자가 바뀐 뒤 늦게 온 앞사람 번역은 그 사람 줄에 붙인다
+        const tsp = t.speaker != null ? String(t.speaker) : null;
+        let tb = S.cur;
+        if (tsp && tb.spk && tb.spk !== tsp) { const f = S.blocks.slice(-6).reverse().find((x) => x.spk === tsp); if (f) tb = f; }
+        tb.ko += t.text; L("k", t.text); if (tb !== S.cur) render(tb);
         ttsBuf += t.text;
         clearTimeout(ttsTimer);
         if (/[.?!。？！]\s*$/.test(ttsBuf)) flush(); else ttsTimer = setTimeout(flush, 1200);
       } else {
-        if (!S.cur || S.cur.closing) newBlock();
+        const sp = t.speaker != null ? String(t.speaker) : null;
+        if (!S.cur || S.cur.closing || (sp && S.cur.spk && sp !== S.cur.spk && (S.cur.ja || S.cur.ko))) newBlock();
+        if (sp && !S.cur.spk) S.cur.spk = sp;
         S.cur.ja += t.text; L("j", t.text);
       }
     }
@@ -889,14 +900,14 @@ let subsT = null;
 function saveSubsSoon() { clearTimeout(subsT); subsT = setTimeout(saveSubs, 3000); }
 function saveSubs() {
   try {
-    const blocks = S.blocks.filter((b) => b.ja || b.ko).slice(-600).map((b) => ({ at: b.at, ja: b.ja, ko: b.ko }));
+    const blocks = S.blocks.filter((b) => b.ja || b.ko).slice(-600).map((b) => ({ at: b.at, ja: b.ja, ko: b.ko, spk: b.spk }));
     localStorage.jpiSubs = JSON.stringify({ blocks, gpt: S.gptLog.slice(-600).map((g) => [g[2], g[1]]), bld: S.bld });
   } catch (_) {}
 }
 function loadSubs() {
   try {
     const d = JSON.parse(localStorage.jpiSubs || "null"); if (!d) return;
-    for (const x of d.blocks || []) { const b = newBlock(); Object.assign(b, { at: x.at, ja: x.ja, ko: x.ko, closing: true }); render(b); }
+    for (const x of d.blocks || []) { const b = newBlock(); Object.assign(b, { at: x.at, ja: x.ja, ko: x.ko, spk: x.spk, closing: true }); render(b); }
     S.gptLog = (d.gpt || []).map(([at, t]) => { const g = [0, t, at]; return g; });
     S.cur = null;
   } catch (_) {}
@@ -906,7 +917,7 @@ const hm = (at) => { const d = new Date(at || Date.now()); return `${String(d.ge
 // ---------- 📝 강연 정리본: 두 엔진 자막 + 용어집 → AI 가 다듬은 한국어 (OpenAI 키 필요) ----------
 function subsText() { // 시간 순서로 A(Soniox 원문+번역)와 B(GPT 번역)를 섞는다
   const rows = [];
-  for (const b of S.blocks) if (b.ja || b.ko) rows.push([b.at, `[${hm(b.at)}] 원문: ${b.ja}\n  A: ${b.ko}`]);
+  for (const b of S.blocks) if (b.ja || b.ko) rows.push([b.at, `[${hm(b.at)}]${b.spk ? " 화자" + b.spk : ""} 원문: ${b.ja}\n  A: ${b.ko}`]);
   for (const g of S.gptLog) if (g[1]) rows.push([g[2], `[${hm(g[2])}] B: ${g[1]}`]);
   return rows.sort((a, b) => a[0] - b[0]).map((r) => r[1]);
 }
@@ -1052,7 +1063,7 @@ let flip0 = true; try { flip0 = localStorage.getItem("jpi_flip") !== "0"; } catc
 setFlip(flip0);
 $("talkFlip").onclick = () => setFlip(!$("talk").classList.contains("flip"));
 // 켜고 끄는 설정은 이 휴대폰에 기억
-for (const id of ["ttsOn", "autoEnd", "autoTurn", "talkVoice"]) {
+for (const id of ["ttsOn", "autoEnd", "autoTurn", "talkVoice", "spkOn"]) {
   const el = $(id), k = "jpiChk_" + id;
   if (localStorage[k]) el.checked = localStorage[k] === "1";
   el.addEventListener("change", () => { localStorage[k] = el.checked ? "1" : "0"; });
@@ -1085,5 +1096,6 @@ $("camClose").onclick = camClose;
 $("cam").addEventListener("touchstart", () => (C.idleAt = Date.now()), { passive: true });
 loadSubs(); dualRefresh(); focusRefresh();
 $("focusBtn").onclick = focusToggle;
+$("spkOn").addEventListener("change", () => { if (S.want && S.engine === "soniox") restart("화자 구분 설정 바꾸는 중"); });
 if (qs.get("engine")) { S.engine = qs.get("engine"); fillEngine(); }
 if (qs.get("lang")) setLang(qs.get("lang"));

@@ -83,6 +83,10 @@
   #subs { flex:1; min-height:42vh; overflow-y:auto; background:var(--card); border:1px solid var(--line); border-radius:14px; padding:12px; scroll-behavior:smooth; }
   .blk { padding:8px 0; border-bottom:1px solid var(--line); }
   .blk:last-child { border-bottom:0; }
+  .spk:empty { display:none; }
+  .spk { display:inline-block; font-size:11px; padding:1px 7px; border-radius:99px; margin-bottom:3px; }
+  .spk.s0 { background:#1f3b57; color:#9fd0ff; } .spk.s1 { background:#4a3a14; color:#ffd27a; }
+  .spk.s2 { background:#1d4630; color:#8ee6b0; } .spk.s3 { background:#46213a; color:#ff9fd6; }
   .ko { color:var(--ko); font-size:var(--fs); line-height:1.45; font-weight:600; }
   .ja { color:var(--ja); font-size:14px; line-height:1.5; margin-top:3px; }
   .tmp { color:var(--dim); }
@@ -190,6 +194,7 @@
       <label>읽어주기 빠르기 (Soniox) <input id="rate" type="range" min="0.8" max="1.6" step="0.1" value="1.15"></label>
       <label>GPT 통역 소리 크기 <input id="vol" type="range" min="0" max="1" step="0.05" value="1"></label>
       <label><span><input id="ttsOn" type="checkbox" checked> 한국어 소리 듣기 (끄면 자막만)</span></label>
+      <label><span><input id="spkOn" type="checkbox" checked> 화자 구분 (말한 사람마다 "화자 1·2" 이름표, Soniox 만)</span></label>
       <label>자막 글자 크기 <input id="fs" type="range" min="16" max="32" step="1" value="21"></label>
       <div class="small">대화</div>
       <label><span><input id="autoEnd" type="checkbox" checked> 말이 멈추면 저절로 번역 끝내기 (끄면 ■ 버튼으로)</span></label>
@@ -201,7 +206,7 @@
         <button id="logBtn">측정 기록 내보내기</button>
         <button id="clrBtn">화면 지우기</button>
       </div>
-      <div class="small" id="ver">v1.5 · 2026-11-17 · 🎯 고른 말만·둘 다(Soniox 자막+GPT 목소리)·📷 간판·상품·📝 정리본 · 대화(한⇄日)·자주 쓰는 말·홈 화면 앱 · 중국어만: 통역사의 일본어는 건너뜀(Soniox 정확, GPT 는 추정)</div>
+      <div class="small" id="ver">v1.5 · 2026-11-17 · 화자 구분·🎯 고른 말만·둘 다(Soniox 자막+GPT 목소리)·📷 간판·상품·📝 정리본 · 대화(한⇄日)·자주 쓰는 말·홈 화면 앱 · 중국어만: 통역사의 일본어는 건너뜀(Soniox 정확, GPT 는 추정)</div>
     </div>
   </details>
 
