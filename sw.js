@@ -1,5 +1,5 @@
 // 홈 화면 앱용 작은 보관소: 인터넷이 될 때는 늘 새 파일을 받고(바로 업데이트), 안 될 때만 보관해 둔 파일을 쓴다.
-const CACHE = "jpi-v1.4";
+const CACHE = "jpi-v1.5";
 const FILES = ["./", "./index.html", "./app.js", "./glossary.js", "./phrases.js", "./pcm-worklet.js", "./manifest.json", "./icon-180.png", "./icon-192.png", "./icon-512.png"];
 self.addEventListener("install", (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting())); });
 self.addEventListener("activate", (e) => {
