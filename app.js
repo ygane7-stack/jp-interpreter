@@ -19,6 +19,7 @@ const $ = (id) => document.getElementById(id);
 const S = {
   engine: localStorage.jpiEngine || "soniox", // v1.5: 기본은 Soniox(용어집·싼 값)
   dual: localStorage.jpiDual === "1", // Soniox 자막 + GPT 목소리 같이
+  focus: localStorage.jpiFocus !== "0", // 🎯 고른 말만 통역(우리끼리 한국어 대화 등은 무시). 기본 켬
   gptLog: [], // 둘 다 켰을 때 GPT 한국어 [시각, 글]
   bld: localStorage.jpiBld || "",
   lang: localStorage.jpiLang || "ja", // ja=일본어 / zh=중국어만(통역사의 일본어는 건너뜀) / mix=일·중 모두
@@ -59,6 +60,7 @@ function fillBuildings() {
   setPairs();
 }
 function setLang(v) {
+  setTimeout(focusRefresh, 0);
   S.lang = v; localStorage.jpiLang = v; setPairs(); fillLang();
   if (S.want && S.engine === "soniox") restart("듣는 말을 바꾸는 중");
 }
@@ -116,6 +118,16 @@ async function detachGpt(e) {
   if (g) { try { await g.stop(); } catch (_) {} }
   if (S.live === e) status("Soniox 통역 중", "on");
 }
+// ---------- 🎯 고른 말만 통역 ----------
+const LANG_KO = { ja: "일본어", zh: "중국어", mix: "일본어·중국어" };
+function allowedLangs() { return S.lang === "ja" ? ["ja"] : S.lang === "zh" ? ["zh", "ja"] : ["ja", "zh"]; } // zh 의 ja(통역사)는 따로 흐리게 처리
+function focusRefresh() {
+  const b = $("focusBtn"); if (!b) return;
+  b.classList.toggle("on", S.focus);
+  b.innerHTML = S.focus ? `🎯 <b>${LANG_KO[S.lang]}만</b> 통역 중 · 한국어 등 다른 말은 무시 <span class='small'>(누르면 모두 통역)</span>`
+    : `🎯 다른 말도 모두 통역 중 <span class='small'>(누르면 ${LANG_KO[S.lang]}만)</span>`;
+}
+function focusToggle() { S.focus = !S.focus; localStorage.jpiFocus = S.focus ? "1" : "0"; focusRefresh(); msg(S.focus ? `${LANG_KO[S.lang]}만 통역합니다 — 우리끼리 하는 한국어는 자막·소리에 안 나와요` : "모든 말을 통역합니다"); }
 function gptLine(t) { const el = $("gptLine"); if (el) el.textContent = "🎧 GPT: " + t; }
 let gptCur = null;
 function gptAdd(delta) {
@@ -241,7 +253,9 @@ async function startOpenAI(stream, opt = {}) {
   const langMarks = []; // [시각, "ja"|"zh"]
   const LAG = 2.0;
   const langAt = (t) => { let v = null; for (const [tt, l] of langMarks) { if (tt <= t) v = l; else break; } return v; };
-  const skipNow = () => S.lang === "zh" && langAt(now() - LAG) === "ja";
+  // 🎯 고른 말만: 원문에 한글이 나오면 한국어 구간으로 보고 그 뒤 몇 초의 번역을 버린다(추정 — GPT 는 언어를 알려 주지 않음)
+  const skipWhy = () => { const l = langAt(now() - LAG); if (S.lang === "zh" && l === "ja") return "ja"; if (S.focus && l === "ko") return "ko"; return null; };
+  const skipNow = () => !!skipWhy();
   eng.iv = setInterval(() => { const o = $("out"); if (o) o.muted = !$("ttsOn").checked || skipNow(); }, 200);
   const gapBlock = () => {
     const t = now();
@@ -260,15 +274,18 @@ async function startOpenAI(stream, opt = {}) {
   dc.onmessage = (m) => {
     let ev; try { ev = JSON.parse(m.data); } catch (_) { return; }
     if (ev.type === "session.input_transcript.delta") {
-      const l = /[\u3040-\u30ff]/.test(ev.delta) ? "ja" : /[\u4e00-\u9fff]/.test(ev.delta) ? "zh" : null;
+      const l = /[\uac00-\ud7a3]/.test(ev.delta) ? "ko" : /[\u3040-\u30ff]/.test(ev.delta) ? "ja" : /[\u4e00-\u9fff]/.test(ev.delta) ? "zh" : null;
       if (l && (!langMarks.length || langMarks.at(-1)[1] !== l)) langMarks.push([now(), l]);
       if (opt.audioOnly) return; // 둘 다: 원문 자막은 Soniox 것을 쓴다
+      if (S.focus && l === "ko") { L("jx", ev.delta); return; } // 우리끼리 한국어: 자막에 안 씀
       gapBlock(); S.cur.ja += ev.delta; L("j", ev.delta); render(S.cur);
     } else if (ev.type === "session.output_transcript.delta" && opt.audioOnly) {
       if (!skipNow()) gptAdd(ev.delta); L("g", ev.delta);
     } else if (ev.type === "session.output_transcript.delta") {
       gapBlock();
-      if (skipNow()) { S.cur.skipKo = (S.cur.skipKo || "") + ev.delta; L("kx", ev.delta); }
+      const why = skipWhy();
+      if (why === "ko") { L("kx", ev.delta); return; }
+      if (why) { S.cur.skipKo = (S.cur.skipKo || "") + ev.delta; L("kx", ev.delta); }
       else { S.cur.ko += ev.delta; L("k", ev.delta); }
       render(S.cur);
     }
@@ -346,7 +363,7 @@ async function startSoniox(stream) {
   const config = {
     model: "stt-rt-v6", audio_format: "pcm_s16le", sample_rate: 16000, num_channels: 1,
     language_hints: S.lang === "ja" ? ["ja"] : S.lang === "zh" ? ["zh", "ja"] : ["ja", "zh"],
-    enable_language_identification: S.lang !== "ja",
+    enable_language_identification: true, // 🎯 고른 말만 통역하려면 말마다 언어를 알아야 함
     enable_endpoint_detection: true, max_endpoint_delay_ms: 1200,
     translation: { type: "one_way", target_language: "ko" },
     context: sonioxContext(S.bld, S.lang),
@@ -365,6 +382,8 @@ async function startSoniox(stream) {
       const tr = t.translation_status === "translation";
       // 중국어만: 일본어(통역사)로 말한 부분과 그 번역은 건너뛴다
       const skip = S.lang === "zh" && (tr ? t.source_language === "ja" : t.language === "ja");
+      const tl = tr ? t.source_language : t.language;
+      if (S.focus && tl && !allowedLangs().includes(tl)) { if (t.is_final) L(tr ? "kx" : "jx", t.text); continue; } // 🎯 다른 말(우리끼리 한국어 등)은 버림
       if (!t.is_final) { if (skip) continue; if (tr) nfKo += t.text; else nfJa += t.text; continue; }
       if (skip) {
         if (!tr) { if (!S.cur || S.cur.closing) newBlock(); S.cur.skipJa = (S.cur.skipJa || "") + t.text; }
@@ -1064,6 +1083,7 @@ $("camBtn").onclick = camOpen;
 $("camPause").onclick = camDetail;
 $("camClose").onclick = camClose;
 $("cam").addEventListener("touchstart", () => (C.idleAt = Date.now()), { passive: true });
-loadSubs(); dualRefresh();
+loadSubs(); dualRefresh(); focusRefresh();
+$("focusBtn").onclick = focusToggle;
 if (qs.get("engine")) { S.engine = qs.get("engine"); fillEngine(); }
 if (qs.get("lang")) setLang(qs.get("lang"));
