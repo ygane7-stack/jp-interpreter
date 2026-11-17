@@ -1,4 +1,5 @@
-// 건축 통역 v1.4 (2026-11-16) — 일본어(·중국어) 해설 → 한국어 자막·음성 + 대화(내 말 한→日 / 상대 말 日→한) + 자주 쓰는 말(인터넷 없이)
+// 건축 통역 v1.5 (2026-11-17) — 일본어(·중국어) 해설 → 한국어 자막·음성 + 대화(내 말 한→日 / 상대 말 日→한) + 자주 쓰는 말(인터넷 없이)
+// v1.5: 둘 다(Soniox 자막 + GPT 목소리) 켜고 끄기 · 📷 간판·상품 사진 번역(셔터 없이 계속) · 📝 강연 정리본 · 자막 휴대폰에 보관
 // 엔진 1: OpenAI gpt-realtime-translate (WebRTC, 음성→음성)
 // 엔진 2: Soniox stt-rt-v6 받아쓰기+번역 (WebSocket) → 브라우저 읽어주기(speechSynthesis)
 // 진짜 API 키는 이 페이지에 없다. Supabase 함수(jp-interpreter-token)에서 몇 분짜리 임시 열쇠만 받는다.
@@ -12,11 +13,13 @@ const LOCAL = ["localhost", "127.0.0.1"].includes(location.hostname);
 const TOKEN_URL = LOCAL && qs.get("tok") ? qs.get("tok") : FUNC;
 const TEST_SRC = LOCAL ? qs.get("src") : null;
 const USD_KRW = 1400;
-const PRICE_PER_MIN = { openai: 0.034, soniox: 0.12 / 60 };
+const PRICE_PER_MIN = { openai: 0.034, soniox: 0.18 / 60 }; // Soniox 는 번역 포함 요금으로 넉넉히
 
 const $ = (id) => document.getElementById(id);
 const S = {
-  engine: localStorage.jpiEngine || "openai",
+  engine: localStorage.jpiEngine || "soniox", // v1.5: 기본은 Soniox(용어집·싼 값)
+  dual: localStorage.jpiDual === "1", // Soniox 자막 + GPT 목소리 같이
+  gptLog: [], // 둘 다 켰을 때 GPT 한국어 [시각, 글]
   bld: localStorage.jpiBld || "",
   lang: localStorage.jpiLang || "ja", // ja=일본어 / zh=중국어만(통역사의 일본어는 건너뜀) / mix=일·중 모두
   want: false, // 사용자가 켜 둔 상태(끊기면 다시 연결)
@@ -75,6 +78,52 @@ function fillEngine() {
       if (S.want) restart("엔진 바꾸는 중");
     };
   }
+  dualRefresh();
+}
+// ---------- 둘 다: Soniox 자막(용어집·원문) + GPT 목소리(자연스러움) ----------
+function dualRefresh() {
+  const b = $("dualBtn"); if (!b) return;
+  b.style.display = S.engine === "soniox" ? "" : "none";
+  b.classList.toggle("on", S.dual);
+  b.innerHTML = S.dual ? "🎧 GPT 목소리 <b>켬</b> · 둘 다 사용 중 <span class='small'>(누르면 끔)</span>" : "🎧 GPT 목소리 더하기 <span class='small'>(중요한 강연 때 켜기)</span>";
+  $("gptLine").style.display = S.dual && S.engine === "soniox" ? "" : "none";
+}
+async function dualToggle() {
+  S.dual = !S.dual; localStorage.jpiDual = S.dual ? "1" : "0"; dualRefresh();
+  const e = S.live;
+  if (!e || e.name !== "soniox") return; // 통역이 꺼져 있으면 다음 시작 때 적용
+  if (S.dual) attachGpt(e); else detachGpt(e);
+}
+async function attachGpt(e, tries = 0) {
+  if (!S.dual || S.live !== e || e.gpt) return;
+  msg("GPT 목소리 연결 중…");
+  try {
+    e.gpt = await startOpenAI(S.stream, { audioOnly: true, onLost: () => {
+      if (S.live !== e || !e.gpt) return;
+      e.gpt.stop().catch(() => {}); e.gpt = null; gptLine("(GPT 목소리 끊김 — 다시 연결 중, 자막·읽어주기는 계속)");
+      if (tries < 4) setTimeout(() => attachGpt(e, tries + 1), 3000);
+    } });
+    if (S.live !== e || !S.dual) { e.gpt.stop().catch(() => {}); e.gpt = null; return; }
+    if ("speechSynthesis" in window) speechSynthesis.cancel(); // 이제 목소리는 GPT 가 맡음
+    msg(""); status("둘 다 통역 중", "on");
+  } catch (err) {
+    e.gpt = null;
+    msg("GPT 목소리 연결 못 함 — Soniox 자막·읽어주기로 계속합니다 (" + String(err.message || err).slice(0, 80) + ")", true);
+  }
+}
+async function detachGpt(e) {
+  const g = e.gpt; e.gpt = null;
+  if (g) { try { await g.stop(); } catch (_) {} }
+  if (S.live === e) status("Soniox 통역 중", "on");
+}
+function gptLine(t) { const el = $("gptLine"); if (el) el.textContent = "🎧 GPT: " + t; }
+let gptCur = null;
+function gptAdd(delta) {
+  const t = now();
+  if (!gptCur || t - gptCur[0] > 2.5 || gptCur[1].length > 200) { gptCur = [t, "", Date.now()]; S.gptLog.push(gptCur); }
+  gptCur[1] += delta; gptCur.last = t;
+  gptLine(S.gptLog.slice(-2).map((x) => x[1]).join(" ").slice(-140));
+  saveSubsSoon();
 }
 
 function newBlock() {
@@ -82,7 +131,7 @@ function newBlock() {
   el.className = "blk";
   el.innerHTML = `<div class="ko"></div><div class="ja"></div><div class="hints"></div>`;
   $("subs").appendChild(el);
-  const b = { el, ja: "", ko: "", jaTmp: "", koTmp: "", hints: new Set(), t: now(), closing: false };
+  const b = { el, ja: "", ko: "", jaTmp: "", koTmp: "", hints: new Set(), t: now(), at: Date.now(), closing: false };
   S.blocks.push(b); S.cur = b;
   if (S.blocks.length > 300) { S.blocks.shift().el.remove(); }
   return b;
@@ -104,7 +153,7 @@ function render(b) {
     b.el.querySelector(".hints").appendChild(s);
   }
   if (atBottom) box.scrollTop = box.scrollHeight;
-  dimUpdate();
+  dimUpdate(); saveSubsSoon();
 }
 
 // ---------- 입력 소리(마이크 또는 시험 파일) ----------
@@ -183,7 +232,7 @@ async function getToken(body) {
 }
 
 // ---------- 엔진 1: OpenAI ----------
-async function startOpenAI(stream) {
+async function startOpenAI(stream, opt = {}) {
   const tok = await getToken({ engine: "openai", lang: "ko", noise: $("noise").value });
   const pc = new RTCPeerConnection();
   const eng = { name: "openai", pc, closed: false };
@@ -213,7 +262,10 @@ async function startOpenAI(stream) {
     if (ev.type === "session.input_transcript.delta") {
       const l = /[\u3040-\u30ff]/.test(ev.delta) ? "ja" : /[\u4e00-\u9fff]/.test(ev.delta) ? "zh" : null;
       if (l && (!langMarks.length || langMarks.at(-1)[1] !== l)) langMarks.push([now(), l]);
+      if (opt.audioOnly) return; // 둘 다: 원문 자막은 Soniox 것을 쓴다
       gapBlock(); S.cur.ja += ev.delta; L("j", ev.delta); render(S.cur);
+    } else if (ev.type === "session.output_transcript.delta" && opt.audioOnly) {
+      if (!skipNow()) gptAdd(ev.delta); L("g", ev.delta);
     } else if (ev.type === "session.output_transcript.delta") {
       gapBlock();
       if (skipNow()) { S.cur.skipKo = (S.cur.skipKo || "") + ev.delta; L("kx", ev.delta); }
@@ -224,7 +276,7 @@ async function startOpenAI(stream) {
     else if (ev.type === "error") { L("err", ev.error); msg("GPT 오류: " + (ev.error?.message || ev.error?.code || ""), true); }
   };
   pc.onconnectionstatechange = () => {
-    if (["failed", "disconnected"].includes(pc.connectionState) && !eng.closed) lost("GPT 연결 끊김");
+    if (["failed", "disconnected"].includes(pc.connectionState) && !eng.closed) (opt.onLost ? opt.onLost() : lost("GPT 연결 끊김"));
   };
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
@@ -268,6 +320,7 @@ if ("speechSynthesis" in window) { pickVoice(); speechSynthesis.onvoiceschanged 
 function speak(text) {
   text = text.trim();
   if (!text || !$("ttsOn").checked || !("speechSynthesis" in window)) return;
+  if (S.live?.gpt) return; // 둘 다: 목소리는 GPT 가 냄
   const u = new SpeechSynthesisUtterance(text);
   u.lang = "ko-KR"; if (koVoice) u.voice = koVoice;
   const base = +$("rate").value;
@@ -357,6 +410,7 @@ async function startEngine() {
   S.retries = 0;
   status(S.engine === "openai" ? "GPT 통역 중" : "Soniox 통역 중", "on");
   L("go", S.engine);
+  if (S.engine === "soniox" && S.dual) attachGpt(S.live);
   if (S.fileSrc && !S.fileStarted) { // 시험 파일: 엔진 준비가 끝난 뒤 재생 시작 → 시각 0
     S.fileStarted = true; S.t0 = performance.now(); S.log = [{ t: 0, k: "play", x: S.engine }];
     S.fileSrc.onended = () => { L("eof"); setTimeout(() => { if (S.want) stopAll().then(() => (window.__done = true)); }, 10000); };
@@ -370,7 +424,7 @@ async function startAll() {
   if ("speechSynthesis" in window) { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; speechSynthesis.speak(u); }
   $("out").play().catch(() => {});
   await ensureCtx();
-  S.want = true; S.t0 = performance.now(); S.startedAt = Date.now(); S.log = [];
+  S.want = true; S.t0 = performance.now(); S.startedAt = Date.now(); S.log = []; S.billSec = 0; S.gptSec = 0;
   setBtn();
   wakeOn(); clockOn();
   try { await startEngine(); msg(""); }
@@ -378,6 +432,7 @@ async function startAll() {
 }
 async function stopEngine() {
   const e = S.live; S.live = null;
+  if (e?.gpt) { const g = e.gpt; e.gpt = null; try { await g.stop(); } catch (_) {} }
   if (e) { try { await e.stop(); } catch (_) {} releaseStream(); }
   if ("speechSynthesis" in window) speechSynthesis.cancel();
 }
@@ -416,7 +471,9 @@ function clockOn() {
   clearInterval(S.clockT);
   S.clockT = setInterval(() => {
     const sec = (Date.now() - S.startedAt) / 1000;
-    const won = Math.round((sec / 60) * PRICE_PER_MIN[S.engine] * USD_KRW);
+    if (S.live) S.billSec = (S.billSec || 0) + 1, S.live.gpt && (S.gptSec = (S.gptSec || 0) + 1);
+    const usd = (S.billSec || 0) / 60 * PRICE_PER_MIN[S.engine] + (S.gptSec || 0) / 60 * PRICE_PER_MIN.openai;
+    const won = Math.round(usd * USD_KRW);
     $("clock").textContent = `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, "0")} · 약 ${won.toLocaleString()}원`;
   }, 1000);
 }
@@ -720,6 +777,7 @@ async function preflight() {
       try { await getToken({ engine: eng, lang: "ko", noise: "far_field" }); add(true, "내 암호 맞음 — 통역 시작 가능"); }
       catch (e) { add(false, "암호 확인 실패: " + (e.message || e)); }
       if (!h[S.engine === "openai" ? "OPENAI_API_KEY" : "SONIOX_API_KEY"]) add(false, `지금 고른 엔진(${S.engine === "openai" ? "GPT" : "Soniox"})은 열쇠가 없어요 — 위에서 다른 엔진을 고르세요`);
+      if (!h.OPENAI_API_KEY) add(false, "OpenAI 열쇠 없음 — 🎧 GPT 목소리(둘 다)·📷 간판·상품·📝 정리본은 안 됩니다 (Soniox 통역·대화는 됨)");
     } else add(null, "열쇠가 들어오면 암호도 여기서 확인합니다");
   } catch (_) { add(false, "통역 서버에 닿지 않음"); }
   try {
@@ -796,7 +854,7 @@ async function saveRec() {
   await shareFile(new Blob(rows.map((r) => r.blob), { type }), `건축해설_${sid}.${ext}`);
 }
 async function saveTxt() {
-  const lines = S.blocks.filter((b) => b.ja || b.ko).map((b) => `[${Math.floor(b.t / 60)}:${String(Math.floor(b.t % 60)).padStart(2, "0")}]\n${b.ja}\n→ ${b.ko}\n`);
+  const lines = subsText().map((l) => l + "\n");
   if (!lines.length) return msg("저장할 자막이 없습니다");
   const head = `건축 통역 자막 ${new Date().toLocaleString("ko-KR")} · 엔진 ${S.engine} · 듣는 말 ${S.lang} · 건물 ${S.bld || "-"}\n\n`;
   await shareFile(new Blob([head + lines.join("\n")], { type: "text/plain" }), `자막_${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "")}.txt`);
@@ -804,6 +862,138 @@ async function saveTxt() {
 async function saveLog() {
   const data = { engine: S.engine, bld: S.bld, lang: S.lang, ua: navigator.userAgent, src: TEST_SRC, log: S.log };
   await shareFile(new Blob([JSON.stringify(data)], { type: "application/json" }), `측정_${S.engine}_${Date.now()}.json`);
+}
+
+
+// ---------- 자막 보관(새로고침·앱 재시작에도 남게) ----------
+let subsT = null;
+function saveSubsSoon() { clearTimeout(subsT); subsT = setTimeout(saveSubs, 3000); }
+function saveSubs() {
+  try {
+    const blocks = S.blocks.filter((b) => b.ja || b.ko).slice(-600).map((b) => ({ at: b.at, ja: b.ja, ko: b.ko }));
+    localStorage.jpiSubs = JSON.stringify({ blocks, gpt: S.gptLog.slice(-600).map((g) => [g[2], g[1]]), bld: S.bld });
+  } catch (_) {}
+}
+function loadSubs() {
+  try {
+    const d = JSON.parse(localStorage.jpiSubs || "null"); if (!d) return;
+    for (const x of d.blocks || []) { const b = newBlock(); Object.assign(b, { at: x.at, ja: x.ja, ko: x.ko, closing: true }); render(b); }
+    S.gptLog = (d.gpt || []).map(([at, t]) => { const g = [0, t, at]; return g; });
+    S.cur = null;
+  } catch (_) {}
+}
+const hm = (at) => { const d = new Date(at || Date.now()); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
+
+// ---------- 📝 강연 정리본: 두 엔진 자막 + 용어집 → AI 가 다듬은 한국어 (OpenAI 키 필요) ----------
+function subsText() { // 시간 순서로 A(Soniox 원문+번역)와 B(GPT 번역)를 섞는다
+  const rows = [];
+  for (const b of S.blocks) if (b.ja || b.ko) rows.push([b.at, `[${hm(b.at)}] 원문: ${b.ja}\n  A: ${b.ko}`]);
+  for (const g of S.gptLog) if (g[1]) rows.push([g[2], `[${hm(g[2])}] B: ${g[1]}`]);
+  return rows.sort((a, b) => a[0] - b[0]).map((r) => r[1]);
+}
+async function summarize() {
+  const lines = subsText();
+  if (!lines.length) return msg("정리할 자막이 없습니다 — 통역을 켜고 들은 뒤 누르세요", true);
+  if (!keyReady()) return msg("설정에서 암호를 먼저 넣어 주세요", true);
+  if (!navigator.onLine) return msg("정리본은 인터넷이 필요해요 — 자막은 휴대폰에 남아 있으니 나중에 누르세요", true);
+  const parts = []; let cur = "";
+  for (const l of lines) { if (cur.length + l.length > 18000 && cur) { parts.push(cur); cur = ""; } cur += l + "\n"; }
+  if (cur) parts.push(cur);
+  const terms = allPairs(S.bld, S.lang).map(([ja, ko]) => `${ja} = ${ko}`).join("\n");
+  const bld = BUILDINGS.find((b) => b.id === S.bld)?.ko || S.bld || "";
+  const box = $("sumTxt"); $("sum").classList.add("on"); $("sumSave").disabled = true;
+  const out = []; const t0 = Date.now();
+  try {
+    for (let i = 0; i < parts.length; i++) {
+      box.textContent = `정리하는 중… ${i + 1}/${parts.length} 부분 (한 부분에 30초~1분)`;
+      const d = await getToken({ kind: "summary", step: "part", text: parts[i], bld, terms });
+      out.push(d.md);
+    }
+    box.textContent = "전체 요약 만드는 중…";
+    const fin = await getToken({ kind: "summary", step: "final", text: out.join("\n\n"), bld, terms });
+    const head = `# 강연 정리본 — ${bld || "건축 해설"}\n${new Date().toLocaleString("ko-KR")} · 자막 ${lines.length}줄 · ${Math.round((Date.now() - t0) / 1000)}초\n\n`;
+    const md = head + fin.md + "\n\n---\n\n## 부분별 다듬은 통역문\n\n" + out.map((m, i) => `### 부분 ${i + 1}\n${m}`).join("\n\n");
+    localStorage.jpiLastSum = md; showSum(md);
+  } catch (e) { box.textContent = "정리 실패: " + (e.message || e) + "\n\n(자막은 그대로 남아 있어요. '자막 저장'으로 파일을 보관해 두면 귀국 후 다시 정리할 수 있어요.)"; }
+}
+function showSum(md) {
+  $("sum").classList.add("on"); $("sumSave").disabled = false;
+  $("sumTxt").innerHTML = esc(md).replace(/^#{1,3} (.*)$/gm, "<b class='h'>$1</b>").replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+}
+async function saveSum() {
+  const md = localStorage.jpiLastSum; if (!md) return;
+  await shareFile(new Blob([md], { type: "text/markdown" }), `정리본_${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "")}.md`);
+}
+
+// ---------- 📷 간판·상품: 셔터 없이 비추기만 하면 2~3초마다 번역 (OpenAI 키 필요) ----------
+// 휴대폰이 멈춰 있고(흔들림 없음) 장면이 바뀌었을 때만 사진을 보낸다 → 같은 간판을 계속 보내지 않아 값이 덜 든다.
+const C = { on: false, stream: null, paused: false, lastSig: null, n: 0, won: 0, idleAt: 0, gen: 0 };
+const VPRICE = { in: 0.25, out: 2.0 }; // gpt-5-mini 백만 토큰당 달러(공식 문서 기준, 바뀔 수 있음)
+function camSig() { // 화면을 16×12 흑백으로 줄인 지문
+  const v = $("camV"), c = camSig.c || (camSig.c = document.createElement("canvas"));
+  c.width = 16; c.height = 12; const g = c.getContext("2d", { willReadFrequently: true });
+  g.drawImage(v, 0, 0, 16, 12); const d = g.getImageData(0, 0, 16, 12).data; const o = new Uint8Array(192);
+  for (let i = 0; i < 192; i++) o[i] = (d[i * 4] + d[i * 4 + 1] + d[i * 4 + 2]) / 3;
+  return o;
+}
+const sigDiff = (a, b) => { if (!a || !b) return 999; let s = 0; for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]); return s / a.length; };
+function camShot(max) {
+  const v = $("camV"), k = Math.min(1, max / Math.max(v.videoWidth, v.videoHeight));
+  const c = document.createElement("canvas"); c.width = Math.round(v.videoWidth * k); c.height = Math.round(v.videoHeight * k);
+  c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+  return c.toDataURL("image/jpeg", 0.72);
+}
+function camCost(u) { if (!u) return; C.won += ((u.prompt_tokens || 0) * VPRICE.in + (u.completion_tokens || 0) * VPRICE.out) / 1e6 * USD_KRW; }
+function camShow(d, detail) {
+  const kindIco = { sign: "🪧", product: "🛍", price: "💴", menu: "🍽", other: "·" };
+  $("camNote").textContent = d.note || "";
+  $("camNote").classList.toggle("big", !!detail);
+  $("camList").innerHTML = (d.items || []).map((x) => `<div class="ci"><span class="k">${kindIco[x.kind] || "·"}</span><div><div class="cko">${esc(String(x.ko || ""))}</div><div class="cja">${esc(String(x.ja || ""))}</div></div></div>`).join("");
+  $("camSt").textContent = `${detail ? "자세히" : "실시간"} · 사진 ${C.n}장 · 약 ${Math.round(C.won).toLocaleString()}원`;
+}
+async function camOpen() {
+  if (!keyReady()) return msg("설정에서 암호를 먼저 넣어 주세요", true);
+  if (S.want) await stopAll(); // 마이크 통역과 동시에 쓰지 않음(아이폰 자원)
+  $("cam").classList.add("on"); $("camSt").textContent = "카메라 켜는 중…";
+  try {
+    C.stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
+    $("camV").srcObject = C.stream; await $("camV").play();
+  } catch (e) { $("camSt").textContent = "카메라를 못 켰어요: " + (e.message || e); return; }
+  C.on = true; C.paused = false; C.lastSig = null; C.idleAt = Date.now(); camPauseBtn(); wakeOn();
+  camLoop(++C.gen);
+}
+function camPauseBtn() { $("camPause").textContent = C.paused ? "▶ 다시 실시간" : "⏸ 멈추고 자세히"; }
+async function camLoop(gen) {
+  while (C.on && gen === C.gen) {
+    if (C.paused || document.hidden || !$("camV").videoWidth) { await sleep(300); continue; }
+    if (Date.now() - C.idleAt > 120000) { C.paused = true; camPauseBtn(); $("camSt").textContent = "2분 지나 쉬는 중(값 아끼기) — ▶ 를 누르면 계속"; continue; }
+    if (!navigator.onLine) { $("camSt").textContent = "인터넷 기다리는 중…"; await sleep(1000); continue; }
+    const a = camSig(); await sleep(250); if (!C.on || gen !== C.gen) break; const b = camSig();
+    if (sigDiff(a, b) > 9) { $("camHint").textContent = "휴대폰을 잠깐 멈춰 주세요"; continue; } // 흔들리는 중
+    if (sigDiff(b, C.lastSig) < 7) { $("camHint").textContent = "✓ 번역됨 — 다른 곳을 비추면 새로 번역"; await sleep(300); continue; } // 같은 장면
+    $("camHint").textContent = "번역 중…";
+    const t0 = performance.now();
+    try {
+      const d = await getToken({ kind: "vision", mode: "scan", image: camShot(1024) });
+      if (!C.on || gen !== C.gen || C.paused) continue;
+      C.n++; camCost(d.usage); C.lastSig = b; camShow(d);
+      $("camHint").textContent = `✓ ${((performance.now() - t0) / 1000).toFixed(1)}초`;
+    } catch (e) { $("camHint").textContent = "번역 실패: " + String(e.message || e).slice(0, 80); await sleep(2000); }
+  }
+}
+async function camDetail() {
+  C.idleAt = Date.now();
+  if (C.paused) { C.paused = false; C.lastSig = null; $("camV").play(); camPauseBtn(); return; } // 다시 실시간
+  C.paused = true; camPauseBtn();
+  const img = camShot(1600); $("camV").pause(); // 화면을 그 장면에 멈춤
+  $("camHint").textContent = "자세히 보는 중… (5~10초)";
+  try { const d = await getToken({ kind: "vision", mode: "detail", image: img }); C.n++; camCost(d.usage); camShow(d, true); $("camHint").textContent = "▶ 를 누르면 다시 실시간"; }
+  catch (e) { $("camHint").textContent = "실패: " + String(e.message || e).slice(0, 80); }
+}
+function camClose() {
+  C.on = false; C.gen++; $("cam").classList.remove("on");
+  if (C.stream) C.stream.getTracks().forEach((t) => t.stop()); C.stream = null; $("camV").srcObject = null;
+  if (!S.want && !S.rec) wakeOff();
 }
 
 // ---------- 묶기 ----------
@@ -864,6 +1054,16 @@ window.addEventListener("online", async () => {
 document.addEventListener("touchend", () => unlockAudio(), { once: true });
 // 홈 화면 앱 + 인터넷 없을 때도 화면이 열리게(파일을 휴대폰에 보관)
 if ("serviceWorker" in navigator && !qs.get("nosw")) navigator.serviceWorker.register("sw.js").catch(() => {});
-$("clrBtn").onclick = () => { $("subs").innerHTML = ""; S.blocks = []; S.cur = null; };
+$("clrBtn").onclick = () => { $("subs").innerHTML = ""; S.blocks = []; S.cur = null; S.gptLog = []; gptCur = null; try { delete localStorage.jpiSubs; } catch (_) {} };
+$("dualBtn").onclick = dualToggle;
+$("sumBtn").onclick = () => (localStorage.jpiLastSum && !S.blocks.length ? showSum(localStorage.jpiLastSum) : summarize());
+$("sumRun").onclick = summarize;
+$("sumSave").onclick = saveSum;
+$("sumClose").onclick = () => $("sum").classList.remove("on");
+$("camBtn").onclick = camOpen;
+$("camPause").onclick = camDetail;
+$("camClose").onclick = camClose;
+$("cam").addEventListener("touchstart", () => (C.idleAt = Date.now()), { passive: true });
+loadSubs(); dualRefresh();
 if (qs.get("engine")) { S.engine = qs.get("engine"); fillEngine(); }
 if (qs.get("lang")) setLang(qs.get("lang"));
